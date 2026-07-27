@@ -241,8 +241,20 @@ Of five documented rules: **2 fully enforced, 2 partial, 1 has zero code.**
 - `docs/adr/1239…md:99` — dead relative link (`reference/…` resolves to `docs/adr/reference/`).
 - `src/plan-drift-guard.cts:5` cites `docs/adr/0022-source-grounding-drift-guard.md` — verified never
   to have existed (`git log --all --diff-filter=A` empty). Carried into the shipped payload.
-- `CONTRIBUTING.md:105` presents a **fabricated worked example as history**: *"Issue #3485 was
-  opened, approved…"* — `gh` confirms #3485 does not exist (max issue is #2620).
+- `CONTRIBUTING.md:105` teaches the naming convention with a worked example that **no longer
+  resolves**: *"Issue #3485 was opened, approved…"* — `gh` confirms #3485 does not resolve in
+  `open-gsd/gsd-core` (max issue is #2620), and no `docs/adr/3485-*` file exists.
+  **CORRECTED 2026-07-27 — this was previously written as "a fabricated worked example as history".
+  That was wrong.** #3485 is a **dangling** reference, not an invented one: the surviving ADR
+  filenames `3524-cjs-sdk-hard-seam.md` and `3660-runtime-artifact-layout-module.md` show that
+  pre-rename numbering reached the 3000s, so #3485 was almost certainly a real
+  `get-shit-done-redux` issue orphaned when the repo was renamed and issue numbering restarted.
+  `docs/adr/0011-review-default-reviewers.md:22` had already reached this same conclusion for the
+  identical phenomenon (#3079/#3464), calling it *"consistent with known predecessor-repo numbering
+  rather than a fabricated reference"* — the audit contradicted an analysis the corpus already had
+  right. The verifier's underlying observation still stands and is the reason the original "dangling
+  reference" phrasing was challenged: these sites are **prose, not links**, so nothing mechanically
+  404s — the defect is that a reader who checks the cited number finds nothing. Repaired in #2691.
 - **13 broken relative links** exist across tracked `.md` files.
 - **`Amends` is not a modelled relation.** ADR-959 and ADR-2008 both amend ADR-894; ADR-894 records
   neither. ADR-2008 writes it bare *and* mis-zero-padded (`ADR-0894`).
@@ -350,8 +362,8 @@ Three laws fired on the *remediation set*, and they changed it materially.
 | 0.0 | **`src/runtime-hooks-surface.cts:1703` → `matcher: 'Read\|WebFetch\|WebSearch'`** (+ `:2133` Kimi, + installer/manifest parity assertion) | Injection scanner dormant for web content on the primary install path for all 15 runtimes |
 | 0.1 | **Add `HOST_COMMAND_ROUTERS` keys to the overlay collision gate** (warn one minor → reject) | Documented invariant is false; empirically reproduced |
 | 0.2 | **Supersede ADR-0001 and ADR-0006 into ADR-0174** as a dated amendment completing the SDK sweep | Two ADRs indexed "Active" decide nothing that exists |
-| 0.3 | Fix 3 confirmed dead refs: `1239:99`, `src/plan-drift-guard.cts:5`, `CONTRIBUTING.md:105` | One ships in the payload; one is fabricated history |
-| 0.4 | Fix ADR-857's H1 `[Proposed]` bracket | Contradicts its own ratified Status |
+| 0.3 | ✅ **Shipped as #2691 / PR #2692.** Fix the confirmed dead refs: `1239` (**3** occurrences, not 1 — #2584 added two post-audit), `src/plan-drift-guard.cts:5`, `CONTRIBUTING.md:105` + `contributor-standards.md:99,103` | One ships in the payload; one is a dangling predecessor-repo number (**not** "fabricated history" — see the corrected note above) |
+| 0.4 | ✅ **Shipped as #2691 / PR #2692.** Fix ADR-857's H1 `[Proposed]` bracket | Contradicts its own ratified Status. Root cause found during the fix: `gen-adr-index.cjs:213` **strips** the bracket for display instead of comparing it to `Status`, so the contradiction was structurally invisible to `adr-index-gate` — the gate was 31/31 green on the broken corpus. Regression coverage now asserts link resolution + bracket/Status agreement |
 
 ### Tier 1 — two ADRs, not twelve (Gall)
 
