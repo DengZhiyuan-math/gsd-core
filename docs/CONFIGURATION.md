@@ -1497,7 +1497,7 @@ The intent is the same as the Claude profile tiers -- use a stronger model for p
 | Value | Behavior | Use When |
 |-------|----------|----------|
 | `false` (default) | Returns Claude aliases (`opus`, `sonnet`, `haiku`) | Claude Code with native Anthropic API |
-| `true` | Maps aliases to full Claude model IDs (`claude-opus-4-8`) | Claude Code with API that requires full IDs |
+| `true` | Maps aliases to full Claude model IDs (`claude-opus-5`) | Claude Code with API that requires full IDs |
 | `"omit"` | Returns empty string (runtime picks its default) | Non-Claude runtimes (Codex, OpenCode, Antigravity CLI, Kilo) |
 
 ### Runtime-Aware Profiles (#2517)
@@ -1510,17 +1510,19 @@ When `runtime` is set, profile tiers (`opus`/`sonnet`/`haiku`) resolve to runtim
 
 | Runtime | `opus` | `sonnet` | `haiku` | reasoning_effort |
 |---------|--------|----------|---------|------------------|
-| `claude` | `claude-opus-4-8` | `claude-sonnet-5` | `claude-haiku-4-5` | (not used) |
+| `claude` | `claude-opus-5` | `claude-sonnet-5` | `claude-haiku-4-5` | (not used) |
 | `codex` | `gpt-5.6-sol` | `gpt-5.6-terra` | `gpt-5.6-luna` | `xhigh` / `medium` / `medium` |
 | `qwen` | `qwen3-max-2026-01-23` | `qwen3-coder-plus` | `qwen3-coder-next` | (not used) |
-| `opencode` | `anthropic/claude-opus-4-8` | `anthropic/claude-sonnet-5` | `anthropic/claude-haiku-4-5` | (not used) |
-| `copilot` | `claude-opus-4-8` | `claude-sonnet-5` | `claude-haiku-4-5` | (not used) |
-| `hermes` | `anthropic/claude-opus-4-8` | `anthropic/claude-sonnet-5` | `anthropic/claude-haiku-4-5` | (not used) |
-| `kilo` | `anthropic/claude-opus-4-8` | `anthropic/claude-sonnet-5` | `anthropic/claude-haiku-4-5` | (not used) |
-| `pi` | `claude-opus-4-8` | `claude-sonnet-5` | `claude-haiku-4-5` | (not used) |
+| `opencode` | `anthropic/claude-opus-5` | `anthropic/claude-sonnet-5` | `anthropic/claude-haiku-4-5` | (not used) |
+| `copilot` | `claude-opus-5` | `claude-sonnet-5` | `claude-haiku-4-5` | (not used) |
+| `hermes` | `anthropic/claude-opus-5` | `anthropic/claude-sonnet-5` | `anthropic/claude-haiku-4-5` | (not used) |
+| `kilo` | `anthropic/claude-opus-5` | `anthropic/claude-sonnet-5` | `anthropic/claude-haiku-4-5` | (not used) |
+| `pi` | `claude-opus-5` | `claude-sonnet-5` | `claude-haiku-4-5` | (not used) |
 | Group B (`cline`, `cursor`, `windsurf` (alias: `devin-desktop`), `augment`, `trae`, `codebuddy`, `antigravity`) | (no built-in default — your runtime handles model selection) | | | |
 
 > **How these model IDs are sourced.** The catalog (`bin/shared/model-catalog.json`) pins each runtime's tier defaults to that provider's current frontier IDs, and may intentionally carry forward-dated IDs ahead of a provider's public docs. To verify an ID is live before changing it, check the provider's own source/API — e.g. Codex: `codex debug models` or the OpenAI Codex models page; Qwen: Alibaba Model Studio model list. Only change an ID that the provider actually rejects — absence from documentation alone is not proof of invalidity.
+
+> **Opus 5 draws from a separate rate-limit bucket (#2683).** The `opus` tier above resolves to `claude-opus-5`, which does **not** share the combined Opus 4.x rate-limit pool — it has its own. Pricing is unchanged ($5 / $25 per MTok, 1M context), but an account provisioned against Opus 4.x limits may see 429s on this default. To stay on the previous generation, use the `anthropic` provider preset at `budget: "medium"` (opus tier → `claude-opus-4-8`) or `budget: "low"` (opus tier → `claude-opus-4-5`) — both rungs are unchanged by this bump — or pin the ID directly via `model_overrides`; overrides always win. Runtimes that bake the resolved model into installed agent artifacts at install time (Codex, OpenCode, Kilo) keep emitting the previous ID until you reinstall or update.
 
 **Codex example** — one config, tiered models, no large `model_overrides` block:
 

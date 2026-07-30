@@ -3127,15 +3127,15 @@ describe('#49 resolveModelPolicy Sub-path B: provider presets', () => {
     const result = resolveModelPolicy(policy, 'opus');
     assert.ok(typeof result === 'string' && result.length > 0,
       `expected a non-empty model ID string, got: ${JSON.stringify(result)}`);
-    assert.strictEqual(result, 'claude-opus-4-8',
-      `expected anthropic opus/high to resolve to claude-opus-4-8, got: ${result}`);
+    assert.strictEqual(result, 'claude-opus-5',
+      `expected anthropic opus/high to resolve to claude-opus-5, got: ${result}`);
   });
 
-  test('known provider "anthropic" + tier "sonnet" + budget "high" preserves Opus 4.8 routing', () => {
+  test('known provider "anthropic" + tier "sonnet" + budget "high" preserves opus-tier routing', () => {
     const policy = { provider: 'anthropic', budget: 'high' };
     const result = resolveModelPolicy(policy, 'sonnet');
-    assert.strictEqual(result, 'claude-opus-4-8',
-      `expected anthropic sonnet/high to resolve to claude-opus-4-8, got: ${result}`);
+    assert.strictEqual(result, 'claude-opus-5',
+      `expected anthropic sonnet/high to resolve to claude-opus-5, got: ${result}`);
   });
 
   test('known provider "anthropic-fable" + tier "opus" + budget "high" resolves to Claude Fable 5', () => {
@@ -3314,8 +3314,8 @@ describe('#49 resolveModelInternal: model_policy in the resolution chain', () =>
       'model_policy must fire before model_profile_overrides and win');
     assert.ok(typeof result === 'string' && result.length > 0,
       'must return a non-empty model ID');
-    assert.strictEqual(result, 'claude-opus-4-8',
-      'expected anthropic preset opus/high to resolve to claude-opus-4-8');
+    assert.strictEqual(result, 'claude-opus-5',
+      'expected anthropic preset opus/high to resolve to claude-opus-5');
   });
 
   test('model_policy with provider:"anthropic" + budget:"high" + runtime:"opencode" resolves to preset model', () => {
@@ -3330,8 +3330,8 @@ describe('#49 resolveModelInternal: model_policy in the resolution chain', () =>
     const result = resolveModelInternal(projectDir, 'gsd-planner');
     assert.ok(typeof result === 'string' && result.length > 0,
       'expected a non-empty model ID');
-    assert.strictEqual(result, 'claude-opus-4-8',
-      'anthropic/opus/high must resolve to claude-opus-4-8');
+    assert.strictEqual(result, 'claude-opus-5',
+      'anthropic/opus/high must resolve to claude-opus-5');
   });
 
   test('model_policy with provider:"anthropic-fable" + budget:"high" resolves to Fable preset model', () => {
@@ -3434,10 +3434,10 @@ describe('#49 resolveModelInternal: model_policy in the resolution chain', () =>
       model_policy: {
         provider: 'anthropic',
         budget: 'high',
-        runtime_tiers: { claude: { opus: { model: 'claude-opus-4-8' } } },
+        runtime_tiers: { claude: { opus: { model: 'claude-opus-5' } } },
       },
     });
-    // gsd-planner -> opus tier; runtime_tiers.claude.opus = claude-opus-4-8 ->
+    // gsd-planner -> opus tier; runtime_tiers.claude.opus = claude-opus-5 ->
     // reverse of MODEL_ALIAS_MAP -> "opus" (exercises the non-fable reverse-map path)
     assert.strictEqual(resolveModelInternal(projectDir, 'gsd-planner'), 'opus');
   });
@@ -3831,10 +3831,10 @@ describe('#2041 model_overrides: Claude full ID → alias on claude runtime', ()
     assert.strictEqual(resolveModelInternal(tmpDir, 'gsd-executor'), 'sonnet');
   });
 
-  test('model_overrides claude-opus-4-8 → "opus" on runtime:claude', () => {
+  test('model_overrides claude-opus-5 → "opus" on runtime:claude', () => {
     writeConfig(tmpDir, {
       runtime: 'claude',
-      model_overrides: { 'gsd-planner': 'claude-opus-4-8' },
+      model_overrides: { 'gsd-planner': 'claude-opus-5' },
     });
     assert.strictEqual(resolveModelInternal(tmpDir, 'gsd-planner'), 'opus');
   });
