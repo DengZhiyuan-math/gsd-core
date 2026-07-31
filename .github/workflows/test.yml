@@ -116,7 +116,19 @@ jobs:
     needs: changes
     if: needs.changes.outputs.product_changed == 'true'
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    # #2952: the `ubuntu-latest / 24` entry is the only `scope: full` lane — it
+    # runs the WHOLE unit suite under c8 coverage, then the scripts/ coverage
+    # floor, integration, security, install and slow, all serially on one runner.
+    # On next@5a0a9f097 that job ran 15m16s against a 15-minute cap, so GitHub
+    # axed it 23s into `npm run test:slow` and reported it `cancelled` — which
+    # reddened `Required tests` and `next` with it. Projected to a completed
+    # slow step (27s on the last green run) the lane costs ~15m20s, and it had
+    # been riding the ceiling for hours (14m25s, 14m51s) before it crossed.
+    #
+    # 25 is ~1.5x that measured cost. tests/ci-test-job-timeout-budget.test.cjs
+    # holds every lane in this file to the same headroom rule, so a budget can
+    # not be lowered back beneath what its lane is known to need.
+    timeout-minutes: 25
     env:
       GSD_PLUGIN_ROOT: .ci-gsd-plugin-root-disabled
       # #2854: pin the emitted gate's baseline to the SAME commit the tree was merged
@@ -353,7 +365,13 @@ jobs:
     # and a NESTED `leg.os` key is not resolvable by the H1 shell-policy linter
     # in scripts/workflow-policy.cjs, which reads `matrix.os`/`matrix.shell`
     # directly. Explicit rows keep both the cross-product and the linter happy.)
-    timeout-minutes: 20
+    # #2952: `full test (windows-latest, 22, shard 3/3)` reached 18m59s (94% of
+    # a 20-minute cap) on 05b170e44 and 18m14s (91%) on 81eeb8a53. The Windows
+    # shards are slow for platform reasons — process spawn and filesystem cost,
+    # not extra work — and this lane has already blown its cap twice before
+    # (#1051, #1212). 30 is ~1.5x the worst observed shard, restoring the
+    # headroom that #1212's sharding bought and this suite has since eaten.
+    timeout-minutes: 30
     env:
       GSD_PLUGIN_ROOT: .ci-gsd-plugin-root-disabled
       # #2854: pin the emitted gate's baseline to the SAME commit the tree was merged
