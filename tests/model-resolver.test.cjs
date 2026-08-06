@@ -3922,6 +3922,48 @@ describe('#2041 model_overrides: Claude full ID → alias on claude runtime', ()
       `expected exactly one override warning, got ${warnings.length}: ${JSON.stringify(writes)}`);
   });
 
+  // ─── #2683: claude-opus-4-8 became UNMAPPABLE (disclosed breaking change) ───
+  //
+  // The catalog's claude runtime opus tier advanced from claude-opus-4-8 to
+  // claude-opus-5. MODEL_ALIAS_MAP is built from runtimeTierDefaults.claude and
+  // CLAUDE_POLICY_ID_TO_ALIAS is its reverse, so "claude-opus-4-8" left the
+  // alias table. A user still pinning that ID in model_overrides used to get the
+  // "opus" alias back; it now takes mapClaudeOverrideForRuntime's
+  // `override.startsWith('claude-')` branch → warnModelOverrideUnmappable() →
+  // return null → fall through to tier resolution.
+  //
+  // The AC5 cases above use claude-opus-4-5, which was ALREADY unmappable before
+  // #2683, so none of them can witness this change. This case must:
+  //   (a) pick an agent whose balanced tier is NOT opus — gsd-executor → sonnet —
+  //       so the returned value alone discriminates, and
+  //   (b) assert the warning fires, which is the half that a same-tier agent
+  //       would hide.
+  // Against the pre-#2683 catalog both assertions fail: resolveModelInternal
+  // returns 'opus' via the direct alias hit, and no warning is emitted at all.
+  test('#2683 model_overrides claude-opus-4-8 no longer maps to "opus" — warns and falls through on runtime:claude', () => {
+    resetRuntimeWarningCaches();
+    writeConfig(tmpDir, {
+      runtime: 'claude',
+      model_profile: 'balanced',
+      model_overrides: { 'gsd-executor': 'claude-opus-4-8' },
+    });
+    const writes = [];
+    const original = process.stderr.write.bind(process.stderr);
+    process.stderr.write = (chunk) => { writes.push(String(chunk)); return true; };
+    let resolved;
+    try {
+      resolved = resolveModelInternal(tmpDir, 'gsd-executor');
+    } finally {
+      process.stderr.write = original;
+    }
+    // gsd-executor balanced → sonnet tier. Pre-#2683 this returned 'opus'.
+    assert.strictEqual(resolved, 'sonnet',
+      `claude-opus-4-8 must fall through to gsd-executor's balanced tier alias, got: ${resolved}`);
+    const warnings = writes.filter((w) => w.includes('model_overrides') && w.includes('claude-opus-4-8'));
+    assert.strictEqual(warnings.length, 1,
+      `expected exactly one unmappable-override warning for claude-opus-4-8, got ${warnings.length}: ${JSON.stringify(writes)}`);
+  });
+
   // AC6: resolveModelForTier (escalation / --attempt path) maps the same way
   test('resolveModelForTier maps claude-sonnet-5 → "sonnet" on runtime:claude', () => {
     writeConfig(tmpDir, {
