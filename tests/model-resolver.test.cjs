@@ -3940,7 +3940,7 @@ describe('#2041 model_overrides: Claude full ID → alias on claude runtime', ()
   //       would hide.
   // Against the pre-#2683 catalog both assertions fail: resolveModelInternal
   // returns 'opus' via the direct alias hit, and no warning is emitted at all.
-  test('#2683 model_overrides claude-opus-4-8 no longer maps to "opus" — warns and falls through on runtime:claude', () => {
+  test('#2683 model_overrides claude-opus-4-8 no longer maps to "opus" — warns and falls through on runtime:claude', (t) => {
     resetRuntimeWarningCaches();
     writeConfig(tmpDir, {
       runtime: 'claude',
@@ -3949,16 +3949,23 @@ describe('#2041 model_overrides: Claude full ID → alias on claude runtime', ()
     });
     const writes = [];
     const original = process.stderr.write.bind(process.stderr);
+    // t.after (Pattern 2, CONTRIBUTING.md) restores stderr even if an assertion
+    // below throws — no try/finally in the test body.
+    t.after(() => { process.stderr.write = original; });
     process.stderr.write = (chunk) => { writes.push(String(chunk)); return true; };
-    let resolved;
-    try {
-      resolved = resolveModelInternal(tmpDir, 'gsd-executor');
-    } finally {
-      process.stderr.write = original;
-    }
+    const resolved = resolveModelInternal(tmpDir, 'gsd-executor');
     // gsd-executor balanced → sonnet tier. Pre-#2683 this returned 'opus'.
+    // This typed value is the primary discriminator; the stderr assertion below
+    // is the only way to witness the SECOND half (that the warning fired).
     assert.strictEqual(resolved, 'sonnet',
       `claude-opus-4-8 must fall through to gsd-executor's balanced tier alias, got: ${resolved}`);
+    // No typed surface exists for this warning: warnModelOverrideUnmappable()
+    // returns void and writes to stderr by deliberate design (#2041/#1133 — the
+    // resolve-model JSON result is parsed from stdout, so the warning MUST stay
+    // on stderr). Matching the captured stderr is therefore the legitimate object
+    // of the test; adding a structured warning-capture API is production-code
+    // scope, out of bounds for this catalog bump. Mirrors the pre-existing
+    // dedupe test above.
     const warnings = writes.filter((w) => w.includes('model_overrides') && w.includes('claude-opus-4-8'));
     assert.strictEqual(warnings.length, 1,
       `expected exactly one unmappable-override warning for claude-opus-4-8, got ${warnings.length}: ${JSON.stringify(writes)}`);
