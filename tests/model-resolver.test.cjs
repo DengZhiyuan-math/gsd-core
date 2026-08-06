@@ -3015,7 +3015,7 @@ describe('#443 injectEffortFrontmatter: newline-agnostic YAML frontmatter inject
  *       "budget": "high",
  *       "runtime_tiers": {
  *         "opencode": {
- *           "opus": { "model": "anthropic/claude-opus-4-8" }
+ *           "opus": { "model": "anthropic/claude-opus-5" }
  *         }
  *       }
  *     }
