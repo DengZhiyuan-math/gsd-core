@@ -560,6 +560,7 @@ Full listing: `gsd-core/bin/lib/*.cjs`.
 | `state-command-router.cjs` | Thin CJS subcommand router adapter for `gsd-tools state` |
 | `state.cjs` | STATE.md parsing, updating, progression, metrics |
 | `state-document.cjs` | Pure STATE.md field extraction, replacement, status normalization, and progress calculation transforms |
+| `state-contract.cjs` | GSD State Contract v1 builder + best-effort writer for `.planning/state.json` (#3227) — derives the milestone display string, current-milestone `phases[]`, and the smart-entry `next` action, then publishes the snapshot at every step boundary without ever failing the parent command. Compiled from `src/state-contract.cts` (gitignored); see `docs/reference/state-json.md` |
 | `surface.cjs` | Runtime surface module — manages the runtime enable/disable surface state independently of the install-time profile marker (ADR-0011 Phase 2) |
 | `task-command-router.cjs` | Thin CJS subcommand router adapter for `gsd-tools task` |
 | `template.cjs` | Template selection and filling with variable substitution |

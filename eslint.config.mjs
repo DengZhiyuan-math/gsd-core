@@ -257,6 +257,8 @@ export default tseslint.config(
       'gsd-core/bin/lib/workflow-fragments.cjs',
       // ADR-1671 Phase 5 (#2932): tsc-generated runtime artifact — lint the src/section-manifest.cts source.
       'gsd-core/bin/lib/section-manifest.cjs',
+      // #3227: tsc-generated runtime artifact — lint the src/state-contract.cts source.
+      'gsd-core/bin/lib/state-contract.cjs',
     ],
   },
 
