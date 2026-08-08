@@ -1115,7 +1115,9 @@ minimal < low < medium < high < xhigh < max
 | `opencode` | `anthropic/claude-opus-5` | `anthropic/claude-sonnet-5` | `anthropic/claude-haiku-4-5` | （不使用） |
 | `copilot` | `claude-opus-5` | `claude-sonnet-5` | `claude-haiku-4-5` | （不使用） |
 | `hermes` | `anthropic/claude-opus-5` | `anthropic/claude-sonnet-5` | `anthropic/claude-haiku-4-5` | （不使用） |
-| B 组（`kilo`、`cline`、`cursor`、`windsurf`、`augment`、`trae`、`codebuddy`、`antigravity`） | （无内置默认——您的运行时处理模型选择） | | | |
+| `kilo` | `anthropic/claude-opus-5` | `anthropic/claude-sonnet-5` | `anthropic/claude-haiku-4-5` | （不使用） |
+| `pi` | `claude-opus-5` | `claude-sonnet-5` | `claude-haiku-4-5` | （不使用） |
+| B 组（`cline`、`cursor`、`windsurf`、`augment`、`trae`、`codebuddy`、`antigravity`） | （无内置默认——您的运行时处理模型选择） | | | |
 
 **Codex 示例** — 单个配置，分层模型，无大型 `model_overrides` 块：
 

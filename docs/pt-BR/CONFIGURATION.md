@@ -1146,7 +1146,9 @@ A saída JSON de `resolve-model` inclui `reasoning_effort` quando o nível de ru
 | `opencode` | `anthropic/claude-opus-5` | `anthropic/claude-sonnet-5` | `anthropic/claude-haiku-4-5` | (não usado) |
 | `copilot` | `claude-opus-5` | `claude-sonnet-5` | `claude-haiku-4-5` | (não usado) |
 | `hermes` | `anthropic/claude-opus-5` | `anthropic/claude-sonnet-5` | `anthropic/claude-haiku-4-5` | (não usado) |
-| Grupo B (`kilo`, `cline`, `cursor`, `windsurf`, `augment`, `trae`, `codebuddy`, `antigravity`) | (sem padrão integrado — seu runtime trata da seleção de modelo) | | | |
+| `kilo` | `anthropic/claude-opus-5` | `anthropic/claude-sonnet-5` | `anthropic/claude-haiku-4-5` | (não usado) |
+| `pi` | `claude-opus-5` | `claude-sonnet-5` | `claude-haiku-4-5` | (não usado) |
+| Grupo B (`cline`, `cursor`, `windsurf`, `augment`, `trae`, `codebuddy`, `antigravity`) | (sem padrão integrado — seu runtime trata da seleção de modelo) | | | |
 
 **Exemplo Codex** — uma configuração, modelos em nível, sem bloco grande de `model_overrides`:
 
