@@ -210,7 +210,13 @@ describe('#2658: end-to-end --trae install never emits the malformed path (accep
   test('local install: no emitted .md/.js/.cjs file contains the malformed strings; the rules file is concrete', () => {
     const { configDir, root } = runMinimalInstall({ runtime: 'trae', scope: 'local' });
     try {
-      const files = walk(configDir).filter((f) => /\.(md|js|cjs)$/.test(f));
+      // CHANGELOG.md is shipped release-history PROSE, not an instruction
+      // artifact any runtime follows: its v1.10.0 entry quotes the malformed
+      // paths verbatim to describe the very defect this test guards. Naming a
+      // fixed bug in the changelog is correct and must not read as emitting it.
+      const files = walk(configDir).filter(
+        (f) => /\.(md|js|cjs)$/.test(f) && path.basename(f) !== 'CHANGELOG.md',
+      );
       assert.ok(files.length > 0, 'expected at least one emitted .md/.js/.cjs file');
       for (const file of files) {
         const content = fs.readFileSync(file, 'utf8');
