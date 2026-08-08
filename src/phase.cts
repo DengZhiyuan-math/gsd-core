@@ -56,6 +56,7 @@ import { platformWriteSync, platformReadSync, platformEnsureDir, retryRenameSync
 import { formatGsdSlash, resolveRuntime } from './runtime-slash.cjs';
 import { realClock } from './clock.cjs';
 import { transitionCore } from './state-transition.cjs';
+import { writeStateContract } from './state-contract.cjs';
 import { updateTableCell, deleteTableRow, escapeCell } from './markdown-table.cjs';
 import { deleteSection, updateBullet } from './markdown-sectionizer.cjs';
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- uat-predicate.cjs is an export= CommonJS module
@@ -982,6 +983,8 @@ function cmdPhaseAdd(cwd: string, description: string, raw: boolean, customId?: 
   };
   if (titleWarning) result['warning'] = titleWarning;
 
+  // State contract v1: roadmap edit is a step boundary.
+  writeStateContract(cwd);
   output(result, raw, result['padded']);
 }
 
@@ -1064,6 +1067,8 @@ function cmdPhaseAddBatch(cwd: string, descriptions: string[], raw: boolean): vo
     platformWriteSync(roadmapPath, rawContent);
     return added;
   });
+  // State contract v1: roadmap edit is a step boundary.
+  writeStateContract(cwd);
   output({ phases: results, count: results.length }, raw);
 }
 
@@ -1241,6 +1246,8 @@ function cmdPhaseInsert(cwd: string, afterPhase: string, description: string, ra
     ),
   };
 
+  // State contract v1: roadmap edit is a step boundary.
+  writeStateContract(cwd);
   output(result, raw, decimalPhase);
 }
 
@@ -1730,6 +1737,8 @@ function cmdPhaseRemove(
     );
   }
 
+  // State contract v1: roadmap edit is a step boundary.
+  writeStateContract(cwd);
   output(
     {
       removed: targetPhase,
@@ -2780,6 +2789,8 @@ function cmdPhaseComplete(cwd: string, phaseNum: string, raw: boolean): void {
     verification_stale_check_indeterminate: staleCheckIndeterminate,
   };
 
+  // State contract v1: phase completion (checkbox flip) is a step boundary.
+  writeStateContract(cwd);
   output(result, raw);
 }
 

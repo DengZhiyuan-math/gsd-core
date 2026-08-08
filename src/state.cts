@@ -32,6 +32,9 @@ const { extractFrontmatter, reconstructFrontmatter, stripFrontmatter } = frontma
 import scanPhasePlans = require('./plan-scan.cjs');
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import stateTransitionMod = require('./state-transition.cjs');
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+import stateContractMod = require('./state-contract.cjs');
+const { writeStateContract } = stateContractMod;
 const { transitionCore, applyStatePreservation, sliceCurrentPositionSection } = stateTransitionMod;
 type StateTransitionIntent = stateTransitionMod.StateTransitionIntent;
 type StateTransitionDeps = stateTransitionMod.StateTransitionDeps;
@@ -574,6 +577,8 @@ function cmdStateAdvancePlan(cwd: string, raw: boolean): void {
     return;
   }
 
+  // State contract v1: plan completion is a step boundary.
+  writeStateContract(cwd);
   if (resultData['advanced'] === false) {
     output(resultData, raw, 'false');
   } else {
@@ -2470,6 +2475,8 @@ function cmdStateBeginPhase(cwd: string, phaseNumber: string | number, phaseName
     return result.content;
   }, cwd, rmwOptions);
 
+  // State contract v1: publish .planning/state.json at this step boundary.
+  writeStateContract(cwd);
   output({ updated, phase: phaseNumber, phase_name: phaseName || null, plan_count: planCount || null }, raw, updated.length > 0 ? 'true' : 'false');
 }
 
@@ -2731,6 +2738,8 @@ function cmdStatePlannedPhase(cwd: string, phaseNumber: string | number, planCou
     return result.content;
   }, cwd, { resync: false, deriveProgressKeys: true });
 
+  // State contract v1: planning completion changes the routed next action.
+  writeStateContract(cwd);
   const result = updated.length === 0
     ? { updated, phase: phaseNumber, plan_count: planCount, warning: 'STATE.md Current Position has no recognized labels — transition was a no-op. Verify STATE.md uses the canonical labeled format (Status:, Total Plans in Phase:, etc.).' }
     : { updated, phase: phaseNumber, plan_count: planCount };
@@ -2765,6 +2774,8 @@ function cmdStateMilestoneSwitch(cwd: string, version: string | undefined, name:
     const content = platformReadSync(statePath) || '';
     const result = transitionCore(content, intent, deps);
     platformWriteSync(statePath, result.content);
+    // State contract v1: milestone switch is a step boundary.
+    writeStateContract(cwd);
     output(
       { switched: true, version, name: resolvedName, status: 'planning' },
       raw,
@@ -3420,6 +3431,8 @@ function cmdStateCompletePhase(cwd: string, raw: boolean, overridePhase?: string
     return reassemble(body);
   }, cwd);
 
+  // State contract v1: phase completion is a step boundary.
+  writeStateContract(cwd);
   output(
     { updated, phase: resolvedPhase },
     raw,

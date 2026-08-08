@@ -18,6 +18,7 @@ import { platformWriteSync, platformEnsureDir, execGit, retryRenameSync } from '
 import { formatGsdSlash, resolveRuntime } from './runtime-slash.cjs';
 import { realClock } from './clock.cjs';
 import { transitionCore } from './state-transition.cjs';
+import { writeStateContract } from './state-contract.cjs';
 import { writeSetComplete } from './write-set.cjs';
 import type { WriteSet } from './write-set.cjs';
 import { updateTableCell } from './markdown-table.cjs';
@@ -847,6 +848,8 @@ function cmdMilestoneComplete(cwd: string, version: string, options: MilestoneCo
     state_updated: fs.existsSync(statePath),
   };
 
+  // State contract v1: milestone completion is a step boundary.
+  writeStateContract(cwd);
   output(result, raw);
 }
 
