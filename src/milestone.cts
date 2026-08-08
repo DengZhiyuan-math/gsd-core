@@ -29,10 +29,21 @@ import phaseIdMod = require('./phase-id.cjs');
 const { escapeRegex, normalizePhaseName, phaseTokenMatches, PHASE_NUMBER_TOKEN_SOURCE } = phaseIdMod;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import roadmapParserMod = require('./roadmap-parser.cjs');
-const { getMilestonePhaseFilter, extractCurrentMilestone, getMilestoneInfo } = roadmapParserMod;
+const {
+  getMilestonePhaseFilter,
+  extractCurrentMilestone,
+  getMilestoneInfo,
+  sliceMilestoneWindow,
+} = roadmapParserMod;
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+import planningScopeMod = require('./planning-scope.cjs');
+const { SCOPE } = planningScopeMod;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import coreUtilsMod = require('./core-utils.cjs');
-const { extractOneLinerFromBody } = coreUtilsMod;
+const { extractOneLinerFromBody, countMatchedSummaries } = coreUtilsMod;
+// eslint-disable-next-line @typescript-eslint/no-require-imports -- plan-scan.cjs is an export= CommonJS module
+import planScanMod = require('./plan-scan.cjs');
+const { scanPhasePlans } = planScanMod;
 const { planningPaths } = planningWorkspace;
 const { extractFrontmatter } = frontmatterMod;
 const { writeStateMd } = stateMod;
@@ -156,10 +167,15 @@ function cmdRequirementsMarkComplete(cwd: string, reqIdsRaw: string[], raw: bool
     // Surface 1 — the checkbox: - [ ] **REQ-ID** → - [x] **REQ-ID**
     // Use replace() + compare to avoid the test()+replace() global regex
     // lastIndex bug where test() advances state and replace() misses matches.
+    // (#2788 defect 2: the flip is CONDITIONAL — when a traceability row EXISTS
+    // for this ID but its Status write is rejected, the checkbox must NOT flip,
+    // so the two surfaces cannot silently diverge. The row-write outcome below
+    // gates whether the flip is kept.)
     const checkboxPattern = new RegExp(`(-\\s*\\[)[ ](\\]\\s*\\*\\*${reqEscaped}\\*\\*)`, 'gi');
+    const beforeCheckbox = reqContent;
     const afterCheckbox = reqContent.replace(checkboxPattern, '$1x$2');
-    const checkboxHit = afterCheckbox !== reqContent;
-    if (checkboxHit) reqContent = afterCheckbox;
+    const checkboxFlipped = afterCheckbox !== beforeCheckbox;
+    if (checkboxFlipped) reqContent = afterCheckbox;
 
     // Surface 2 — the traceability row: | <REQ-ID> | Phase N | Pending | → ... Complete |
     // via the markdown-table seam (ADR-2143 §7) — supersedes the prior ordinal
@@ -178,7 +194,11 @@ function cmdRequirementsMarkComplete(cwd: string, reqIdsRaw: string[], raw: bool
     // updateTableCell call both probes the current value and writes.
     let tableHit = false;
     const tableUpdate = updateTraceabilityCell(reqContent, rowMatch, 'Status', (current) => {
-      if (/^pending$/i.test(current.trim())) {
+      // #2788: accept `Gaps Found` as a forward input too — `revert-phase` (the
+      // documented gaps_found response) leaves a row stranded at Gaps Found with
+      // no inverse; a genuinely-satisfied requirement must be able to reach
+      // Complete again via mark-complete, or the milestone is blocked forever.
+      if (/^(pending|gaps found)$/i.test(current.trim())) {
         tableHit = true;
         return ' Complete ';
       }
@@ -186,6 +206,18 @@ function cmdRequirementsMarkComplete(cwd: string, reqIdsRaw: string[], raw: bool
     });
     if (tableUpdate.ok) {
       reqContent = tableUpdate.value;
+    }
+
+    // #2788 defect 2: if a row EXISTS for this ID but its Status write was
+    // rejected (e.g. the row reads `Blocked`, which mark-complete does not
+    // accept), roll the checkbox back so the checkbox and the row cannot
+    // silently diverge. The checkbox and the row are two representations of the
+    // same fact; flipping one while the other rejects the write is the lie.
+    let checkboxHit = checkboxFlipped;
+    const rowExistsProbe = tableUpdate;  // ok === a row matched (probes existence)
+    if (checkboxFlipped && rowExistsProbe.ok && !tableHit) {
+      reqContent = beforeCheckbox;
+      checkboxHit = false;
     }
 
     // ADR-2143 §6 per-ID write-set entries: this ID's checkbox surface is
@@ -215,7 +247,14 @@ function cmdRequirementsMarkComplete(cwd: string, reqIdsRaw: string[], raw: bool
     const doneCheckbox = new RegExp(`-\\s*\\[x\\]\\s*\\*\\*${reqEscaped}\\*\\*`, 'i').test(reqContent);
     const doneTable = Boolean(hasRow && /^complete$/i.test(currentStatusCell.trim()));
 
-    if (checkboxHit || tableHit) {
+    // #2788 defect 2: when a traceability table exists AND this ID has a row in
+    // it, `updated`/`marked_complete` must reflect the ROW moving, not a
+    // checkbox-only flip. Otherwise (`table_unmatched` — no row for this ID, or
+    // no table at all) the checkbox flip is a legitimate partial reconcile / the
+    // sole completion surface, so the #2140 OR semantics are preserved.
+    const rowExists = hasTable && hasRow;
+    const idUpdated = rowExists ? tableHit : (checkboxHit || tableHit);
+    if (idUpdated) {
       updated.push(reqId);
     } else if (doneTable || (doneCheckbox && !hasTable)) {
       // Fully reconciled: the table row is Complete, OR the checkbox is done and
@@ -305,17 +344,21 @@ function cmdRequirementsReadyIds(cwd: string, args: string[], raw: boolean): voi
   }
 
   const planAbsPath = path.resolve(cwd, planPathArg);
-  const phaseDir = path.dirname(planAbsPath);
-  const currentBasename = path.basename(planAbsPath);
+  // #3183: `planPathArg` may point at a root plan (`<phaseDir>/<n>-PLAN.md`)
+  // or a nested plan (`<phaseDir>/plans/PLAN-<n>.md`, #3139 layout) —
+  // scanPhasePlans always operates on the PHASE dir, so a nested plan needs
+  // one extra `dirname` to reach it, and its planFiles-relative identity
+  // carries the `plans/` prefix scanPhasePlans itself applies.
+  const isNestedPlanPath = path.basename(path.dirname(planAbsPath)) === 'plans';
+  const phaseDir = isNestedPlanPath ? path.dirname(path.dirname(planAbsPath)) : path.dirname(planAbsPath);
+  const currentRelative = isNestedPlanPath ? `plans/${path.basename(planAbsPath)}` : path.basename(planAbsPath);
 
-  let siblingPlanFiles: string[] = [];
-  try {
-    siblingPlanFiles = fs
-      .readdirSync(phaseDir)
-      .filter((f) => f.endsWith('-PLAN.md') && f !== currentBasename);
-  } catch {
-    siblingPlanFiles = [];
-  }
+  // #3183: canonical plan/summary sets (root+nested, superseded-excluded)
+  // from the single owner, rather than a root-only hand-rolled readdirSync
+  // filter — a superseded sibling that still declares reqId with no SUMMARY
+  // used to block the ID forever (false-block); it is now excluded upstream.
+  const phaseScan = scanPhasePlans(phaseDir);
+  const siblingPlanFiles = phaseScan.planFiles.filter((f) => f !== currentRelative);
 
   const parseFrontmatterReqIds = (content: string, sourcePath?: string): string[] => {
     const fm = extractFrontmatter(content, sourcePath);
@@ -351,9 +394,11 @@ function cmdRequirementsReadyIds(cwd: string, args: string[], raw: boolean): voi
       if (!siblingDeclaresId) continue;
 
       // Sibling declares the SAME ID — it must have finished (produced a
-      // SUMMARY) before this ID is ready to mark Complete.
-      const siblingSummaryPath = siblingPath.replace(/-PLAN\.md$/, '-SUMMARY.md');
-      if (!fs.existsSync(siblingSummaryPath)) {
+      // SUMMARY) before this ID is ready to mark Complete. Canonical pairing
+      // via countMatchedSummaries (root+nested, all three naming forms)
+      // instead of a bespoke -PLAN.md→-SUMMARY.md regex swap.
+      const siblingHasSummary = countMatchedSummaries([siblingFile], phaseScan.summaryFiles) > 0;
+      if (!siblingHasSummary) {
         blockedBySibling = true;
         break;
       }
@@ -483,29 +528,63 @@ function cmdMilestoneComplete(cwd: string, version: string, options: MilestoneCo
   const today = realClock.localToday();
   const milestoneName = options.name || version;
 
-  // Ensure archive directory exists (skipped in dry-run — no mutations)
-  if (!options.dryRun) {
-    platformEnsureDir(archiveDir);
-  }
-
   // Scope stats and accomplishments to only the phases belonging to the
   // current milestone's ROADMAP.  Uses the shared filter from roadmap-parser.cjs
   // (same logic used by cmdPhasesList and other callers).
+  // #3184 review finding: this scope computation + refusal MUST run BEFORE
+  // `platformEnsureDir(archiveDir)` below — a refused run (scope not COMPLETE,
+  // no --force) must be a true no-op on disk, and creating the archive
+  // directory first left an empty directory behind even on refusal.
   const isDirInMilestone = getMilestonePhaseFilter(cwd, version);
   if (isDirInMilestone.missingExplicitVersion) {
     error(`no phases found for milestone ${version} in ROADMAP.md`);
+  }
+  // #3184/#3166: `milestone complete` is the ONE-WAY-DOOR consumer of the
+  // milestone window (ROADMAP/REQUIREMENTS archived, phase directories
+  // MOVED). #3166 is specifically the TRUNCATED case: the milestone's
+  // heading IS found but its section closes before the phase region, and the
+  // phase filter degrades to pass-all (see getMilestonePhaseFilter above) —
+  // silently archiving every phase directory on disk. UNREADABLE (no
+  // ROADMAP.md at all) and UNSCOPED (no section for this version) are
+  // pre-existing, legitimately-handled states — `missingExplicitVersion`
+  // above already errors where that matters, and a missing ROADMAP.md has
+  // its own documented graceful path — so only TRUNCATED is refused here.
+  // The read-path consumers keep the pass-all degrade for every scope
+  // (ADR-3180 Decision 3's Rejected section: deny-all there would trade one
+  // silent wrong answer for another); this write path refuses on TRUNCATED
+  // alone, positioned before `platformEnsureDir` so a refusal stays a no-op
+  // on disk.
+  if (isDirInMilestone.scope === SCOPE.TRUNCATED && !options.force) {
+    error(
+      `Cannot mark milestone complete: the ROADMAP window for "${version}" is truncated ` +
+        `(the milestone heading was found but its section ends before reaching any phase ` +
+        `entries, even though the ROADMAP has phase entries elsewhere), so phase scoping ` +
+        `cannot be trusted for this destructive operation. Re-run with --force to override.`,
+    );
   }
 
   // Guard: prevent marking complete when ROADMAP still lists phases that have
   // no directory on disk (disk_status: no_directory). This catches the case
   // where the active milestone was erroneously marked complete before phases
-  // were even started. Only fires when STATE.md confirms the current milestone
-  // version matches what is being completed — no false positives on fresh
-  // projects where phases haven't been scaffolded yet.
+  // were even started. The scan scopes the ROADMAP via the `version` argument
+  // (getMilestonePhaseFilter / extractCurrentMilestone above) and runs whenever
+  // --force is absent — a fresh project with no `### Phase N:` headings in the
+  // scoped slice yields an empty `noDirectoryPhases` and the guard is a no-op,
+  // so no STATE match is required to avoid false positives.
   // Pass --force to override this guard.
+  //
+  // #2946: the scan used to be nested inside `if (stateVersion && stateVersion
+  // === version)`, which silently disarmed the guard whenever STATE.md's
+  // `milestone:` field was desynced or absent — functionally an implicit
+  // --force on a one-way-door operation (ROADMAP/REQUIREMENTS archived, phase
+  // directories MOVED). The STATE field is not the source of truth for which
+  // phases belong to this milestone; the ROADMAP scoping is. The scan now runs
+  // unconditionally, and a present-but-mismatched STATE field emits a WARNING
+  // so the suspicious condition is visible rather than silent.
   if (!options.force) {
     try {
-      // Only guard when STATE.md's milestone field matches the version being completed.
+      // Read STATE.md's milestone field only to detect a suspicious mismatch;
+      // it no longer gates the scan. (#2946)
       let stateVersion: string | null = null;
       try {
         const stateRaw = fs.existsSync(statePath) ? fs.readFileSync(statePath, 'utf-8') : null;
@@ -514,57 +593,89 @@ function cmdMilestoneComplete(cwd: string, version: string, options: MilestoneCo
           if (milestoneMatch) stateVersion = milestoneMatch[1].trim();
         }
       } catch {
-        /* skip */
+        /* skip — stateVersion stays null, scan still runs */
+      }
+      if (stateVersion !== null && stateVersion !== version) {
+        // #2946: emit a WARNING so the suspicious STATE mismatch is visible
+        // rather than silently disarming the guard. Plain-text diagnostic on
+        // stderr, matching the existing [gsd-tools] WARNING convention
+        // (state.cts). A missing STATE.md `milestone:` field is not warned
+        // here — the scan still runs, and "no milestone declared" is a normal
+        // state for a fresh project, not a suspicious drift.
+        //
+        // `stateVersion` comes from a user-controlled file (STATE.md) and is
+        // not validated like the CLI `version` arg (ARCHIVE_VERSION_LABEL_RE).
+        // Sanitize before interpolating into stderr so ANSI escapes / control
+        // chars / secret-looking strings cannot be echoed verbatim into a CI
+        // log or terminal (CONTRIBUTING.md security: secret-looking values in
+        // stderr). `version` is already constrained to [A-Za-z0-9._-].
+        const safeStateVersion = stateVersion.replace(/[\x00-\x1f\x7f]/g, '?').slice(0, 80);
+        process.stderr.write(
+          `[gsd-tools] WARNING: STATE.md milestone: "${safeStateVersion}" ≠ requested "${version}" — ` +
+            `running the unstarted-phase guard against the ROADMAP scoped for "${version}" anyway.\n`,
+        );
       }
 
-      if (stateVersion && stateVersion === version) {
-        const roadmapContent = fs.readFileSync(roadmapPath, 'utf-8');
-        const scopedContent = extractCurrentMilestone(roadmapContent, cwd);
-        // #1729: `(?:\s*\([^)\n]{0,200}\))?` tolerates a pre-colon ( ) tag (literal mirror of OPTIONAL_PHASE_TAG_SOURCE).
-        const phasePattern = new RegExp(`#{2,4}\\s*Phase\\s+(${PHASE_NUMBER_TOKEN_SOURCE})(?:\\s*\\([^)\\n]{0,200}\\))?\\s*:\\s*([^\\n]+)`, 'gi');
-        const noDirectoryPhases: string[] = [];
-        let pm: RegExpExecArray | null;
-        const phaseDirEntries = ((): string[] => {
-          try {
-            return fs
-              .readdirSync(phasesDir, { withFileTypes: true })
-              .filter((e) => e.isDirectory())
-              .map((e) => e.name);
-          } catch {
-            return [];
-          }
-        })();
-        while ((pm = phasePattern.exec(scopedContent)) !== null) {
-          const phaseNum = pm[1];
-          // Phase 0 (pre-milestone) and Phase 999 (backlog) are sentinels, not
-          // real phases — they legitimately have no directory and must not block
-          // milestone completion. Mirrors the engine-wide sentinel convention
-          // (phase-id getMilestoneFromPhaseId, roadmap-command-router SENTINELS,
-          // the #1445 /^999/ progress filters). (#1580)
-          const major = parseInt(phaseNum, 10);
-          if (major === 0 || major === 999) continue;
-          const normalized = normalizePhaseName(phaseNum);
-          // A phase has disk_status: 'no_directory' when no phase directory
-          // with a matching token exists on disk. Use the same phaseTokenMatches
-          // helper that roadmap.analyze uses to avoid false positives on decimal
-          // (2.1) and letter-suffix (12A) phase IDs.
-          const hasDirectory = phaseDirEntries.some((d) => phaseTokenMatches(d, normalized));
-          if (!hasDirectory) {
-            noDirectoryPhases.push(phaseNum);
-          }
+      const roadmapContent = fs.readFileSync(roadmapPath, 'utf-8');
+      // #3184/#2946: scope the unstarted-phase guard to the same `version`
+      // window `getMilestonePhaseFilter` used above, NOT to
+      // extractCurrentMilestone's own STATE.md-derived window — those two
+      // can disagree (that disagreement is exactly what the WARNING above
+      // detects), and scoping this guard to the wrong window under-detects
+      // unstarted phases on the destructive completion path. Calls the same
+      // sliceMilestoneWindow owner getMilestonePhaseFilter's versionOverride
+      // branch calls (a prior pass here re-composed locate+select+section-end
+      // locally, which review caught as a second, disagreeing derivation of
+      // the same window — ADR-3180 Decision 4(c)); falls back to
+      // extractCurrentMilestone's whole-document result only for the
+      // free-form (no versioned milestones anywhere) shape, where both
+      // windows converge to the same value regardless of which version drove
+      // the lookup.
+      const scopedContent = sliceMilestoneWindow(roadmapContent, version) ?? extractCurrentMilestone(roadmapContent, cwd);
+      // #1729: `(?:\s*\([^)\n]{0,200}\))?` tolerates a pre-colon ( ) tag (literal mirror of OPTIONAL_PHASE_TAG_SOURCE).
+      const phasePattern = new RegExp(`#{2,4}\\s*Phase\\s+(${PHASE_NUMBER_TOKEN_SOURCE})(?:\\s*\\([^)\\n]{0,200}\\))?\\s*:\\s*([^\\n]+)`, 'gi');
+      const noDirectoryPhases: string[] = [];
+      let pm: RegExpExecArray | null;
+      const phaseDirEntries = ((): string[] => {
+        try {
+          return fs
+            .readdirSync(phasesDir, { withFileTypes: true })
+            .filter((e) => e.isDirectory())
+            .map((e) => e.name);
+        } catch {
+          return [];
         }
-        if (noDirectoryPhases.length > 0) {
-          error(
-            `Cannot mark milestone complete: ROADMAP lists ${noDirectoryPhases.length} unstarted phase(s) ` +
-              `(e.g. Phase ${noDirectoryPhases[0]}). Re-run with --force to override.`,
-          );
+      })();
+      while ((pm = phasePattern.exec(scopedContent)) !== null) {
+        const phaseNum = pm[1];
+        // Phase 0 (pre-milestone) and Phase 999 (backlog) are sentinels, not
+        // real phases — they legitimately have no directory and must not block
+        // milestone completion. Mirrors the engine-wide sentinel convention
+        // (phase-id getMilestoneFromPhaseId, roadmap-command-router SENTINELS,
+        // the #1445 /^999/ progress filters). (#1580)
+        const major = parseInt(phaseNum, 10);
+        if (major === 0 || major === 999) continue;
+        const normalized = normalizePhaseName(phaseNum);
+        // A phase has disk_status: 'no_directory' when no phase directory
+        // with a matching token exists on disk. Use the same phaseTokenMatches
+        // helper that roadmap.analyze uses to avoid false positives on decimal
+        // (2.1) and letter-suffix (12A) phase IDs.
+        const hasDirectory = phaseDirEntries.some((d) => phaseTokenMatches(d, normalized));
+        if (!hasDirectory) {
+          noDirectoryPhases.push(phaseNum);
         }
+      }
+      if (noDirectoryPhases.length > 0) {
+        error(
+          `Cannot mark milestone complete: ROADMAP lists ${noDirectoryPhases.length} unstarted phase(s) ` +
+            `(e.g. Phase ${noDirectoryPhases[0]}). Re-run with --force to override.`,
+        );
       }
     } catch (e) {
       // If the error came from our guard, re-throw it; otherwise skip silently.
       const message = e instanceof Error ? e.message : String(e);
       if (message && message.startsWith('Cannot mark milestone complete:')) throw e;
-      // Phase scan failed or STATE version mismatch — allow completion to proceed.
+      // Phase scan failed (e.g. ROADMAP unreadable) — allow completion to proceed.
     }
   }
 
@@ -585,10 +696,12 @@ function cmdMilestoneComplete(cwd: string, version: string, options: MilestoneCo
       if (!isDirInMilestone(dir)) continue;
 
       phaseCount++;
-      const phaseFiles = fs.readdirSync(path.join(phasesDir, dir));
-      const plans = phaseFiles.filter((f) => f.endsWith('-PLAN.md') || f === 'PLAN.md');
-      const summaries = phaseFiles.filter((f) => f.endsWith('-SUMMARY.md') || f === 'SUMMARY.md');
-      totalPlans += plans.length;
+      // #3183: canonical plan/summary sets (root+nested, superseded-excluded)
+      // from the single owner, rather than a root-only hand-rolled readdirSync
+      // filter.
+      const phaseScan = scanPhasePlans(path.join(phasesDir, dir));
+      const summaries = phaseScan.summaryFiles;
+      totalPlans += phaseScan.planCount;
 
       // Extract one-liners from summaries
       for (const s of summaries) {
@@ -668,6 +781,14 @@ function cmdMilestoneComplete(cwd: string, version: string, options: MilestoneCo
     return;
   }
 
+  // Ensure archive directory exists. Deliberately placed AFTER the dry-run
+  // early return and every refusal/guard above (missingExplicitVersion, the
+  // scope refusal, the unstarted-phase guard) — #3184 review finding: this
+  // used to run before those checks, so a refused run still left an empty
+  // archive directory behind. Reaching this point means the run is
+  // committed to mutating.
+  platformEnsureDir(archiveDir);
+
   // Archive ROADMAP.md
   if (fs.existsSync(roadmapPath)) {
     const roadmapContent = fs.readFileSync(roadmapPath, 'utf-8');
@@ -734,7 +855,7 @@ function cmdMilestoneComplete(cwd: string, version: string, options: MilestoneCo
         version,
         nextMilestoneCommand: formatGsdSlash('new-milestone', resolveRuntime(cwd)) as string,
       },
-      { clock: realClock, progressProvider: () => null, sourcePath: statePath },
+      { clock: realClock, sourcePath: statePath },
     );
     writeStateMd(statePath, result.content, cwd);
   }

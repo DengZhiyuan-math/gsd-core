@@ -95,20 +95,64 @@ function pathExistsInternal(cwd: string, targetPath: string): boolean {
 
 function generateSlugInternal(text: string | null | undefined): string | null {
   if (!text) return null;
-  return text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').substring(0, 60);
+  // #2849: strip leading/trailing hyphens AFTER truncation, not only before.
+  // .substring(0, 60) can land on a separator, re-introducing a trailing hyphen
+  // the strip step exists to prevent. Truncation cannot add a leading hyphen, so
+  // running the full ^-+|-+$ pass last is equivalent for leading hyphens and
+  // fixes the trailing-hyphen-after-truncation case.
+  return transliterateForSlug(text).replace(/[^a-z0-9]+/g, '-').substring(0, 60).replace(/^-+|-+$/g, '');
+}
+
+// ─── Transliteration (#2848) ─────────────────────────────────────────────────
+//
+// Non-Latin titles used to reduce to an empty slug: the `[^a-z0-9]+` strip
+// removed every character of an all-Cyrillic title and the hyphen cleanup left
+// "". Callers then created unnamed phase directories (`01-`) and empty
+// `milestone_slug` init JSON. The fix transliterates Cyrillic to ASCII BEFORE
+// the existing ASCII filter, so a non-Latin title yields a usable ASCII slug
+// while Latin-script text (which hits zero map entries) is byte-for-byte
+// unchanged — the negative control is satisfied by construction.
+//
+// Multi-letter mappings (ж→zh, ч→ch, ш→sh, щ→sch, ю→yu, я→ya) are applied as a
+// single pass; soft/hard signs (ъ, ь) drop to nothing rather than a hyphen.
+// Scope is Cyrillic (Russian + the reported Ukrainian/Belarusian extras
+// і ї є ґ ў) per the issue's confirmed-working patch. CJK and other
+// non-transliterated scripts keep the existing strip-to-ASCII behavior.
+const CYRILLIC_TRANSLITERATION: Readonly<Record<string, string>> = {
+  // multi-letter first (longest-match-safe within a single pass via ordered keys)
+  а: 'a', б: 'b', в: 'v', г: 'g', д: 'd', е: 'e', ё: 'e', ж: 'zh',
+  з: 'z', и: 'i', й: 'y', к: 'k', л: 'l', м: 'm', н: 'n', о: 'o',
+  п: 'p', р: 'r', с: 's', т: 't', у: 'u', ф: 'f', х: 'h', ц: 'ts',
+  ч: 'ch', ш: 'sh', щ: 'sch', ъ: '', ы: 'y', ь: '', э: 'e', ю: 'yu',
+  я: 'ya',
+  // Ukrainian / Belarusian extras reported in #2848
+  є: 'ye', і: 'i', ї: 'yi', ґ: 'g', ў: 'u',
+};
+
+const CYRILLIC_TRANSLITERATION_KEYS = Object.keys(CYRILLIC_TRANSLITERATION);
+
+/**
+ * Lowercase + transliterate Cyrillic characters to ASCII. The output still
+ * contains non-ASCII for scripts outside the map (CJK, etc.) — the caller's
+ * existing `[^a-z0-9]+` filter handles those. Latin-script input is returned
+ * lowercased with no other change.
+ *
+ * Shared by `generateSlugInternal` (core-utils) and `slugify` (gsd2-import) so
+ * the transliteration step is not duplicated across the two slug helpers (#2848
+ * explicitly requires both be fixed).
+ */
+function transliterateForSlug(text: string): string {
+  const lowered = text.toLowerCase();
+  let out = '';
+  for (const ch of lowered) {
+    out += CYRILLIC_TRANSLITERATION_KEYS.includes(ch)
+      ? CYRILLIC_TRANSLITERATION[ch]
+      : ch;
+  }
+  return out;
 }
 
 // ─── Phase file helpers ──────────────────────────────────────────────────────
-
-/** Filter a file list to just PLAN.md / *-PLAN.md entries. */
-function filterPlanFiles(files: string[]): string[] {
-  return files.filter(f => f.endsWith('-PLAN.md') || f === 'PLAN.md');
-}
-
-/** Filter a file list to just SUMMARY.md / *-SUMMARY.md entries. */
-function filterSummaryFiles(files: string[]): string[] {
-  return files.filter(f => f.endsWith('-SUMMARY.md') || f === 'SUMMARY.md');
-}
 
 interface PhaseFileStats {
   plans: string[];
@@ -117,20 +161,65 @@ interface PhaseFileStats {
   hasContext: boolean;
   hasVerification: boolean;
   hasReviews: boolean;
+  scope: string;
+}
+
+// Minimal shape this module needs from plan-scan.cjs's scanPhasePlans result.
+interface PlanScanResultShape {
+  planFiles: string[];
+  summaryFiles: string[];
+  scope: string;
 }
 
 /**
  * Read a phase directory and return counts/flags for common file types.
+ *
+ * #3183 (ADR-3180 Decision 2): `plans`/`summaries` are derived from the
+ * canonical `scanPhasePlans` rather than a local re-derivation, so this
+ * primitive can no longer diverge from the single owner of live-plan
+ * counting. `scanPhasePlans`
+ * lives in plan-scan.cjs, which itself imports `countMatchedSummaries` from
+ * THIS module — a top-level import here would be circular, so the require
+ * is deferred (lazy, inside the function body) to break the cycle at load
+ * time. This mirrors the lazy-require seam already used elsewhere in this
+ * repo (see src/audit-command-router.cts) for the same "module A needs
+ * module B which needs module A" shape.
+ *
+ * `hasResearch`/`hasContext`/`hasVerification`/`hasReviews` stay on the raw
+ * `readdirSync` listing — they are not plan-scan concerns.
+ *
+ * Degrades on an unreadable directory instead of throwing: empty arrays,
+ * every flag false, scope UNREADABLE (mirroring scanPhasePlans's own
+ * degrade path).
  */
 function getPhaseFileStats(phaseDir: string): PhaseFileStats {
-  const files = fs.readdirSync(phaseDir);
+  // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-unsafe-assignment
+  const scanPhasePlans: (dir: string) => PlanScanResultShape = require('./plan-scan.cjs');
+  const scan = scanPhasePlans(phaseDir);
+
+  let files: string[];
+  try {
+    files = fs.readdirSync(phaseDir);
+  } catch {
+    return {
+      plans: scan.planFiles,
+      summaries: scan.summaryFiles,
+      hasResearch: false,
+      hasContext: false,
+      hasVerification: false,
+      hasReviews: false,
+      scope: scan.scope,
+    };
+  }
+
   return {
-    plans: filterPlanFiles(files),
-    summaries: filterSummaryFiles(files),
+    plans: scan.planFiles,
+    summaries: scan.summaryFiles,
     hasResearch: files.some(f => f.endsWith('-RESEARCH.md') || f === 'RESEARCH.md'),
     hasContext: findContextMdIn(files) !== null,
     hasVerification: files.some(f => f.endsWith('-VERIFICATION.md') || f === 'VERIFICATION.md'),
     hasReviews: files.some(f => f.endsWith('-REVIEWS.md') || f === 'REVIEWS.md'),
+    scope: scan.scope,
   };
 }
 
@@ -228,18 +317,92 @@ function countMatchedSummaries(planFiles: string[], summaryFiles: string[]): num
   const summarySet = new Set(summaryFiles);
   let matched = 0;
   for (const plan of planFiles) {
-    const slashIdx = plan.lastIndexOf('/');
-    const dir = slashIdx >= 0 ? plan.slice(0, slashIdx + 1) : '';
-    const base = (dir ? plan.slice(dir.length) : plan).replace(/\.md$/i, '');
-    const candidates: string[] = [
-      dir + base.replace(/PLAN/i, 'SUMMARY') + '.md',
-      dir + base + '-SUMMARY.md',
-    ];
-    const extended = base.match(/^(\d+)-PLAN-(\d+)/i);
-    if (extended) candidates.push(dir + extended[1] + '-' + extended[2] + '-SUMMARY.md');
-    if (candidates.some((c) => summarySet.has(c))) matched++;
+    if (summaryCandidates(plan).some((c) => summarySet.has(c))) matched++;
   }
   return matched;
+}
+
+/**
+ * The candidate `*-SUMMARY.md` filenames a single plan's completion record
+ * could take, per the three naming conventions documented above
+ * `countMatchedSummaries`. Extracted so `findUnsummarizedPlans` can reuse the
+ * exact same matching rule without duplicating it (a divergence between the
+ * count and the list would let a plan be counted as matched while still
+ * appearing in the unsummarized set, or vice versa).
+ */
+function summaryCandidates(plan: string): string[] {
+  const slashIdx = plan.lastIndexOf('/');
+  const dir = slashIdx >= 0 ? plan.slice(0, slashIdx + 1) : '';
+  const base = (dir ? plan.slice(dir.length) : plan).replace(/\.md$/i, '');
+  const candidates: string[] = [
+    dir + base.replace(/PLAN/i, 'SUMMARY') + '.md',
+    dir + base + '-SUMMARY.md',
+  ];
+  const extended = base.match(/^(\d+)-PLAN-(\d+)/i);
+  if (extended) candidates.push(dir + extended[1] + '-' + extended[2] + '-SUMMARY.md');
+  // #3183: canonical-id form. Restores the coverage of the pre-migration
+  // bespoke I001 rule (verify.cts, pre-#3183, via validate.cjs's now-unused
+  // `canonicalPlanStem` — behaviourally identical to `extractCanonicalPlanId`,
+  // confirmed empirically), which matched a plan carrying a descriptive slug
+  // after its <phase>-<plan> id — e.g. `68-01-scaffolding-PLAN.md` — against
+  // a summary named only by the bare id — `68-01-SUMMARY.md`. None of the
+  // three candidates above produce that filename.
+  //
+  // Narrowed to the case `extractCanonicalPlanId` actually extracted an
+  // <id>-<id> pair (its result differs from the plan's own PLAN-stripped
+  // base). When no pair is found it falls back to returning that same base
+  // unchanged, which would otherwise push a redundant candidate identical to
+  // the `<stem>-SUMMARY.md` form above (e.g. `setup-PLAN.md` -> canonical
+  // 'setup' -> 'setup-SUMMARY.md', already candidate #2) rather than the
+  // original rule's actual behavior of matching only real id pairs.
+  //
+  // Collision, matching the original rule byte-for-behaviour: two plans that
+  // share the same <phase>-<plan> id but differ only in their descriptive
+  // slug (`68-01-alpha-PLAN.md` + `68-01-beta-PLAN.md`) both generate the
+  // SAME candidate `68-01-SUMMARY.md` and therefore BOTH read as summarized
+  // off one shared summary file. This is not a new regression: the
+  // pre-migration bespoke rule collapsed the same way (it populated one
+  // `summaryBases` Set keyed by canonical stem, so any plan whose canonical
+  // stem hit the set counted as matched, with no cardinality check against
+  // how many plans shared that stem).
+  const planStem = base.replace(/-PLAN$/i, '');
+  const canonicalId = extractCanonicalPlanId(base + '.md');
+  if (canonicalId !== planStem) candidates.push(dir + canonicalId + '-SUMMARY.md');
+  return candidates;
+}
+
+/**
+ * #2648: the plan files in `planFiles` that have NO matching completion record
+ * in `summaryFiles`, using the identical matching rule as `countMatchedSummaries`
+ * (so the count and the named list can never disagree). Callers that must NAME
+ * the missing plans — e.g. phase.complete's fail-closed coverage gate, which
+ * refuses completion when any non-retired plan lacks a SUMMARY — need the list,
+ * not just the count. `planFiles` is expected to be already superseded-filtered
+ * (the caller passes `scanPhasePlans(...).planFiles`, which drops
+ * `status: superseded` plans), so a deliberately-retired plan never appears
+ * here and never blocks completion.
+ */
+function findUnsummarizedPlans(planFiles: string[], summaryFiles: string[]): string[] {
+  const summarySet = new Set(summaryFiles);
+  return planFiles.filter((plan) => !summaryCandidates(plan).some((c) => summarySet.has(c)));
+}
+
+/**
+ * #3183: the mirror image of `findUnsummarizedPlans` — the summary files in
+ * `summaryFiles` that do NOT pair with ANY plan in `planFiles`, using the
+ * identical `summaryCandidates` matching rule as `countMatchedSummaries` /
+ * `findUnsummarizedPlans`. Callers that must name orphaned summaries (a
+ * stray non-plan summary, or a summary whose plan was renamed/removed) need
+ * this instead of a bespoke exact-suffix Set-diff, which cannot recognize
+ * the nested or extended naming forms `summaryCandidates` already handles —
+ * a divergence that produced false "orphan summary" warnings.
+ */
+function findOrphanSummaries(planFiles: string[], summaryFiles: string[]): string[] {
+  const claimed = new Set<string>();
+  for (const plan of planFiles) {
+    for (const candidate of summaryCandidates(plan)) claimed.add(candidate);
+  }
+  return summaryFiles.filter((s) => !claimed.has(s));
 }
 
 export = {
@@ -248,11 +411,12 @@ export = {
   extractOneLinerFromBody,
   pathExistsInternal,
   generateSlugInternal,
-  filterPlanFiles,
-  filterSummaryFiles,
+  transliterateForSlug,
   getPhaseFileStats,
   readSubdirectories,
   timeAgo,
   extractCanonicalPlanId,
   countMatchedSummaries,
+  findUnsummarizedPlans,
+  findOrphanSummaries,
 };

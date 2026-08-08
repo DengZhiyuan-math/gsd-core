@@ -125,7 +125,7 @@ Clarify WHAT a phase delivers through Socratic questioning with quantitative amb
 
 **Edge Coverage (Step 5.5):** After the ambiguity gate passes, spec-phase runs an edge-completeness probe over each requirement. It raises only applicable categories from a closed 8-category taxonomy (boundary, adjacency, empty, encoding, ordering, precision, idempotency, concurrency), proposes one concrete candidate edge per category, and records each as `covered` / `dismissed` (reason required) / `backstop` / `unresolved` in a `## Edge Coverage` SPEC section. Unresolved applicable edges soft-gate the spec (Resolve / Write-anyway-flagged / Keep-probing); `covered` and `backstop` edges are later lifted into plan-phase `must_haves`. Under `--auto` the probe **never auto-dismisses** — it auto-covers where a defensible acceptance criterion exists, otherwise auto-backstops.
 
-**Prohibition Coverage (Step 5.6):** After the edge probe, spec-phase runs a prohibition-completeness probe — a two-stage prose pass (adversarial recall → precision classifier) that surfaces the unwritten *must-NOT* constraints (values/safety/ethics) the spec never forbids. Each is resolved to `resolved` (a NEGATIVE acceptance criterion, carrying a `test` or `judgment` verification tier) / `dismissed` (reason required) / `unresolved`, recorded in a `## Prohibitions (must-NOT)` SPEC section. Resolved prohibitions are lifted into plan-phase `must_haves.prohibitions`; judgment-tier items soft-gate at verify time (never silent, never hard-halt) and unwired test-tier items fail closed. Under `--auto` the probe **never auto-dismisses**; canon-bound concerns (OWASP / GDPR / fairness) are referred to `/gsd:secure-phase`.
+**Prohibition Coverage (Step 5.6):** After the edge probe, spec-phase runs a prohibition-completeness probe — a two-stage prose pass (adversarial recall → precision classifier) that surfaces the unwritten *must-NOT* constraints (values/safety/ethics) the spec never forbids. Each is resolved to `resolved` (a NEGATIVE acceptance criterion, carrying a `test` or `judgment` verification tier) / `dismissed` (reason required) / `unresolved`, recorded in a `## Prohibitions (must-NOT)` SPEC section. Resolved prohibitions are lifted into plan-phase `must_haves.prohibitions`; judgment-tier items soft-gate at verify time (never silent, never hard-halt) and unwired test-tier items fail closed. Under `--auto` the probe **never auto-dismisses**; canon-bound concerns (OWASP / GDPR / fairness) are referred to `/gsd-secure-phase`.
 
 **Prerequisites:** `.planning/ROADMAP.md` exists
 **Produces:** `{phase}-SPEC.md` (with a `## Edge Coverage` section)
@@ -227,13 +227,13 @@ Research, plan, and verify a phase.
 - With `--view`: print existing RESEARCH.md to stdout, no spawn. Errors if RESEARCH.md missing.
 
 **Package Legitimacy Gate (v1.42.1):**
-When the researcher recommends external packages, it runs `slopcheck install <pkg> --json` on each one and writes a `## Package Legitimacy Audit` table to RESEARCH.md recording Registry, Age, Downloads, Source Repo, and slopcheck verdict. Verdicts:
+When the researcher recommends external packages, it runs `gsd-tools query package-legitimacy check --ecosystem <npm|pypi|crates> <pkg>` on each one and writes a `## Package Legitimacy Audit` table to RESEARCH.md recording Registry, Age, Downloads, Source Repo, and legitimacy verdict. Verdicts are computed from live registry APIs (npm, PyPI, crates.io):
 
 - `[SLOP]` — package removed from RESEARCH.md entirely; never reaches the planner
 - `[SUS]` — package flagged; planner inserts `checkpoint:human-verify` before the install task
 - `[OK]` — package approved; no checkpoint added
 
-Packages sourced from WebSearch are tagged `[ASSUMED]` (not `[VERIFIED]`) and treated the same as `[SUS]` — they get a human checkpoint before install. If `slopcheck` cannot be installed, every recommended package is tagged `[ASSUMED]` and gated.
+Packages sourced from WebSearch are tagged `[ASSUMED]` (not `[VERIFIED]`) and treated the same as `[SUS]` — they get a human checkpoint before install. A failed registry lookup degrades to `[SUS]` rather than throwing, so it is gated, not silently accepted. `slopcheck` is an optional escalate-only adapter that no shipped configuration wires; it is not required for the gate to function.
 
 See [Package Legitimacy Gate in the User Guide](USER-GUIDE.md#package-legitimacy-gate-v1421) for the full checkpoint format, verdict table, and troubleshooting.
 
@@ -263,7 +263,7 @@ Cross-AI plan convergence loop — replan with review feedback until no HIGH con
 | Argument / Flag | Required | Description |
 |-----------------|----------|-------------|
 | `N` | **Yes** | Phase number to plan and review |
-| `--codex` / `--gemini` / `--claude` / `--opencode` | No | Single-reviewer selection |
+| Reviewer flags | No | Pass through every reviewer lane flag: `--gemini`, `--claude`, `--codex`, `--coderabbit`, `--opencode`, `--qwen`, `--cursor`, `--agy` / `--antigravity`, `--ollama`, `--lm-studio`, `--llama-cpp`, `--kimi-code` |
 | `--all` | No | Run every configured reviewer in parallel |
 | `--max-cycles N` | No | Override cycle cap (default 3) |
 
@@ -388,9 +388,9 @@ Create PR from completed phase work with auto-generated body.
 - Key decisions
 - Optional configured PRD-style sections from `ship.pr_body_sections`
 
-**Ship gates (capability-driven):** `/gsd:ship` runs every active `ship:pre` gate from the capability registry. Two are on by default:
+**Ship gates (capability-driven):** `/gsd-ship` runs every active `ship:pre` gate from the capability registry. Two are on by default:
 
-- **Security** (`security` capability): blocks while `SECURITY.md` reports `threats_open > 0`. Resolve via `/gsd:secure-phase {n}`.
+- **Security** (`security` capability): blocks while `SECURITY.md` reports `threats_open > 0`. Resolve via `/gsd-secure-phase {n}`.
 - **Broken-windows ledger** (`broken-windows` capability, issue #1950): when `workflow.windows_enforce=true` is set, blocks while `.planning/WINDOWS.md` reports any `open` entry. The ledger accumulates stubs, TODOs, skipped tests, unrun verifies, and unmet truths across phases. Resolve an entry with `gsd-tools windows fixed <id>` (defect resolved) or `gsd-tools windows waive <id> "<reason>"` (justified deferral — reason is required and recorded). Inspect via `gsd-tools windows status`. Enforcement is **opt-in** (default `workflow.windows_enforce=false`): enable with `gsd config-set workflow.windows_enforce true`; tracking continues regardless.
 
 See [Custom PR Body Sections](ship-pr-body-sections.md) for onboarding, examples, and validation rules.
@@ -453,6 +453,28 @@ Archive milestone, tag release.
 ```bash
 /gsd-complete-milestone
 ```
+
+**Pre-close artifact audit.** Before archiving, the workflow runs `gsd-tools audit-open` and reports every unresolved item across nine categories:
+
+| Category | Source | Open when |
+|----------|--------|-----------|
+| Debug sessions | `.planning/debug/` | status not `resolved` / `complete` |
+| Quick tasks | `.planning/quick/` | SUMMARY missing or not `complete` |
+| Threads | `.planning/threads/` | status not terminal |
+| Pending todos | `.planning/todos/pending/` | present |
+| Seeds | `.planning/seeds/` | not yet implemented |
+| UAT gaps | `*-UAT.md` | scenarios still pending |
+| Verification gaps | `*-VERIFICATION.md` | verdict `gaps_found` / `human_needed` |
+| CONTEXT questions | `*-CONTEXT.md` | questions left open |
+| **Deferred items** | `deferred-items.md` | entry lacks `status: resolved` |
+
+If any category is non-empty you are prompted with `[R] Resolve` / `[A] Acknowledge all` / `[C] Cancel`. `[A]` records the items to `STATE.md` under its own `## Deferred Items` heading and closes as `override_closeout`; an all-clear closes as `verified_closeout`.
+
+> **Note:** the `deferred-items.md` category is the per-phase SCOPE BOUNDARY log a phase agent writes when it finds a defect it should not fix. It is a different artifact from the `## Deferred Items` section `[A]` writes into `STATE.md`, which records what you acknowledged at close.
+
+> **Truncated-window guard.** Archiving also refuses when the milestone's ROADMAP window is truncated — `Cannot mark milestone complete: the ROADMAP window for "<version>" is truncated`. This is the case where the milestone's heading is found but its section closes before reaching the roadmap's `### Phase N:` region (typically a closed-milestone heading sitting in between), which previously degraded to an over-inclusive filter and archived *every* phase directory in the project rather than the milestone's own. An unreadable ROADMAP.md or a version with no matching section at all are pre-existing, legitimately-handled states and are not refused here. Same override as below: `gsd-tools milestone complete <version> --force`. A window that is genuinely empty — a freshly-declared milestone with no phases yet — is *not* affected and still completes normally.
+
+> **Unstarted-phase guard.** Archiving refuses if the milestone's ROADMAP still lists a phase with no phase directory on disk — `Cannot mark milestone complete: ROADMAP lists N unstarted phase(s)`. If a phase was intentionally deferred or merged without a directory, run `gsd-tools milestone complete <version> --force` (the `/gsd-complete-milestone` workflow runs the underlying command without `--force`, so use the CLI directly to override). A `STATE.md` `milestone:` value that does not match `<version>` prints a WARNING and still runs the guard (#2946).
 
 ---
 
@@ -606,7 +628,7 @@ node gsd-tools.cjs phase uat-passed 3 --raw                  # Machine-readable 
 
 ## Navigation Commands
 
-### `/gsd:next`
+### `/gsd-next`
 
 Open the state-aware smart-entry launcher. It reads `.planning/STATE.md`, `ROADMAP.md`, verification artifacts, and git status, classifies the current situation, shows a short menu, then dispatches exactly one existing GSD command.
 
@@ -615,12 +637,12 @@ This is a launcher/router only — it never performs project work directly. Dete
 **Situations detected:** no project, paused work, blockers, failed verification, first-phase setup, planning, executing, pending verification, idle stranded work, complete milestone, or unknown state.
 
 ```bash
-/gsd:next                          # Detect state and route to the best next action
+/gsd-next                          # Detect state and route to the best next action
 ```
 
 ### `/gsd-progress`
 
-Show status, next steps, and automatically advance to the next logical workflow step. Reads project state and determines the appropriate action. Use `/gsd:next` when you want an interactive smart-entry menu before dispatch; use `/gsd-progress --next` when you want GSD to advance directly.
+Show status, next steps, and automatically advance to the next logical workflow step. Reads project state and determines the appropriate action. Use `/gsd-next` when you want an interactive smart-entry menu before dispatch; use `/gsd-progress --next` when you want GSD to advance directly.
 
 | Flag | Description |
 |------|-------------|
@@ -628,7 +650,7 @@ Show status, next steps, and automatically advance to the next logical workflow 
 | `--next --auto` | Like `--next`, but chains steps automatically until milestone completion or a blocking decision |
 | `--next --converge` | When the next action is planning, route it through `/gsd-plan-review-convergence`; requires `workflow.plan_review_convergence=true` |
 | `--cross-ai` | Alias for `--converge` |
-| Reviewer flags | With `--converge`, pass through `--codex`, `--gemini`, `--claude`, `--opencode`, `--ollama`, `--lm-studio`, `--llama-cpp`, `--all`, and `--max-cycles N` |
+| Reviewer flags | With `--converge`, pass through every reviewer lane flag: `--gemini`, `--claude`, `--codex`, `--coderabbit`, `--opencode`, `--qwen`, `--cursor`, `--agy` / `--antigravity`, `--ollama`, `--lm-studio`, `--llama-cpp`, `--kimi-code`, `--all`, and `--max-cycles N` |
 | `--do "task description"` | Analyze freeform intent and dispatch to the most appropriate GSD command |
 | `--forensic` | Append a 6-check integrity audit after the standard report (STATE consistency, orphaned handoffs, deferred scope drift, memory-flagged pending work, blocking todos, uncommitted code) |
 
@@ -858,7 +880,7 @@ Run all remaining phases autonomously.
 | `--interactive` | Lean context with user input |
 | `--converge` | Route each planning step through `/gsd-plan-review-convergence`; requires `workflow.plan_review_convergence=true` |
 | `--cross-ai` | Alias for `--converge` |
-| Reviewer flags | With `--converge`, pass through `--codex`, `--gemini`, `--claude`, `--opencode`, `--ollama`, `--lm-studio`, `--llama-cpp`, `--all`, and `--max-cycles N` |
+| Reviewer flags | With `--converge`, pass through every reviewer lane flag: `--gemini`, `--claude`, `--codex`, `--coderabbit`, `--opencode`, `--qwen`, `--cursor`, `--agy` / `--antigravity`, `--ollama`, `--lm-studio`, `--llama-cpp`, `--kimi-code`, `--all`, and `--max-cycles N` |
 | `--text` | Replace `AskUserQuestion` prompts with plain numbered lists |
 
 ```bash
@@ -1465,16 +1487,19 @@ Reviewers are prompted to verify the plan's claims against the actual repository
 | `--qwen` | Include Qwen Code review (Alibaba Qwen models) |
 | `--cursor` | Include Cursor agent review |
 | `--agy` / `--antigravity` | Include Antigravity CLI review (free with Google credentials) |
+| `--kimi-code` | Include Kimi Code CLI review (Moonshot AI) |
 | `--ollama` | Include Ollama server review |
 | `--lm-studio` | Include LM Studio server review |
 | `--llama-cpp` | Include llama.cpp server review |
 | `--all` | Include all available reviewers (CLI + local model servers) |
 
-**`jq` prerequisite (some lanes only):** `--ollama`, `--lm-studio`, `--llama-cpp`, `--opencode`, and `--agy` parse JSON that GSD does not produce itself — OpenAI-compatible `/v1/chat/completions` responses, OpenCode's JSONL event stream, and Antigravity's conversation cache — so they require [`jq`](https://jqlang.org/download/) on your `PATH`. If `jq` is missing, `/gsd-review` reports those five as unavailable and tells you to install it, rather than running them into an empty review — an info note when the lane was reached through `--all` or `review.default_reviewers`, an error when you named it with an explicit flag. The other six lanes (`--gemini`, `--claude`, `--codex`, `--coderabbit`, `--qwen`, `--cursor`) need no `jq`. Reading your configured models, hosts, and token budgets never requires `jq`.
+**No `jq`, `curl`, or `timeout` prerequisite.** Reviewer lanes used to shell out to these for JSON parsing, HTTP calls, and wall-clock bounding, which made five lanes unavailable on a stock Windows/Git-Bash host (no `jq`) and left one lane unbounded on stock macOS (no `timeout` or `gtimeout`). GSD now does all three itself, so every lane runs with nothing on your `PATH` but the reviewer's own CLI. A lane that declares an external tool it genuinely needs still reports itself unavailable with an install hint rather than running into an empty review.
 
-**Unavailable reviewers:** an explicit reviewer flag is an assertion. If you name a reviewer that cannot run on this host — its CLI is not installed, a prerequisite such as `jq` is missing, or its local server is unreachable — `/gsd-review` reports an **error** for that reviewer and does not proceed with a reduced set. This holds even when other named reviewers are available: `--gemini --qwen` on a host without `qwen` fails rather than silently becoming a Gemini-only review.
+**Unavailable reviewers:** an explicit reviewer flag is an assertion. If you name a reviewer that cannot run on this host — its CLI is not installed, a required external tool is missing, its local server is unreachable, or its egress destination changed (see below) — `/gsd-review` reports an **error** for that reviewer and does not proceed with a reduced set. This holds even when other named reviewers are available: `--gemini --qwen` on a host without `qwen` fails rather than silently becoming a Gemini-only review.
 
 Reviewers reached through `--all` or `review.default_reviewers` behave differently: an undetected reviewer there is reported as an info note and skipped. Use `--all` for "whatever is available on this host", and `review.default_reviewers` for a preferred subset that may vary by host.
+
+**Changed egress destination:** a reviewer lane is sent your plan text, requirements, research findings, and `CONTEXT.md` decisions. For the local-server lanes (`--ollama`, `--lm-studio`, `--llama-cpp`) the destination comes from a config key such as `review.ollama_host`, which is an ordinary editable value — including by a pull request. If you installed such a lane as a capability and its host has changed since you consented to it, GSD **blocks that lane and tells you both destinations** rather than sending your plans somewhere you did not approve. Re-consent to allow the new host. First-party lanes shipped with GSD are unaffected, and a lane you never consented to is not blocked — there is nothing to compare it against.
 
 **Default reviewer behavior (no flags):**
 - If `review.default_reviewers` is **unset**, `/gsd-review` runs all detected reviewers (current default behavior).

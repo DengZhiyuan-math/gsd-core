@@ -20,7 +20,11 @@ import phaseLocatorMod = require('./phase-locator.cjs');
 const { findPhaseInternal } = phaseLocatorMod;
 import { extractDecisions } from './decisions.cjs';
 import type { Decision } from './decisions.cjs';
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+import frontmatterMod = require('./frontmatter.cjs');
+const { extractFrontmatter } = frontmatterMod;
 import { stripFencedCode, collectSections } from './markdown-sectionizer.cjs';
+import { validatePath } from './security.cjs';
 import { checkUiPresence } from './ui-safety-gate.cjs';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import verifyModule = require('./verify.cjs');
@@ -38,7 +42,13 @@ const { evaluatePredicate } = gatePredicateEval;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import apiCoverageMod = require('./api-coverage.cjs');
 const { detectApiIntegration, validateCoverageMatrix } = apiCoverageMod;
-import { execTool, posixNormalize } from './shell-command-projection.cjs';
+import { execTool, platformReadSync, posixNormalize } from './shell-command-projection.cjs';
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+import planScanMod = require('./plan-scan.cjs');
+const { scanPhasePlans } = planScanMod;
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+import planningScopeMod = require('./planning-scope.cjs');
+const { SCOPE } = planningScopeMod;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -129,13 +139,13 @@ function gateEnabled(projectDir: string): boolean {
 
 function loadPlanContents(phaseDir: string): string[] {
   if (!fs.existsSync(phaseDir)) return [];
-  try {
-    return fs.readdirSync(phaseDir)
-      .filter((entry) => /-PLAN\.md$/.test(entry))
-      .map((entry) => readIfExists(path.join(phaseDir, entry)));
-  } catch {
-    return [];
-  }
+  // #3183 (lint-plan-count-drift): source live plan files from the single
+  // owner (scanPhasePlans) instead of a local `-PLAN.md` readdirSync filter
+  // — picks up bare PLAN.md and nested plans/, and excludes plans marked
+  // `status: superseded`, which the prior root-only exact-suffix filter did
+  // neither for.
+  return scanPhasePlans(phaseDir).planFiles
+    .map((entry) => readIfExists(path.join(phaseDir, entry)));
 }
 
 const DESIGNATED_HEADINGS_RE = /^#{1,6}\s+(?:must[_ ]haves?|truths?|tasks?|objective)\b/i;
@@ -276,13 +286,23 @@ function loadDecisionExtraction(contextPath: string): { trackable: Decision[]; o
 
 function cmdDecisionCoveragePlan(projectDir: string, args: string[], raw: boolean): void {
   const phaseDir = args[2] ? resolvePath(args[2], projectDir) : '';
-  const contextPath = args[3] ? resolvePath(args[3], projectDir) : '';
+  const contextArg = args[3];
+  const contextPath = contextArg ? resolvePath(contextArg, projectDir) : '';
 
   if (!gateEnabled(projectDir)) {
     output({ passed: true, skipped: true, reason: 'workflow.context_coverage_gate is false', total: 0, covered: 0, uncovered: [], message: 'Decision coverage gate disabled by config.' }, raw, undefined);
     return;
   }
-  if (!contextPath || !fs.existsSync(contextPath)) {
+  // #2770: an EMPTY/MISSING contextPath argument is a CALLER ERROR (the workflow
+  // forgot to pass the path — e.g. a shell variable lost between Bash blocks), not
+  // evidence the phase has no CONTEXT.md. Fail closed (mirrors #1365 fail-loud) so a
+  // blocking gate cannot silently certify success on a caller mistake.
+  if (!contextArg || contextArg === '') {
+    output({ passed: false, skipped: false, reason: 'missing context path argument', total: 0, covered: 0, uncovered: [], message: 'Decision coverage gate called without a context path argument — the caller (e.g. the plan-phase workflow) must pass the CONTEXT.md path. An empty argument is a caller error, not evidence there is nothing to check (#2770).' }, raw, undefined);
+    return;
+  }
+  // A REAL path whose file genuinely does not exist is the LEGITIMATE green skip.
+  if (!fs.existsSync(contextPath)) {
     output({ passed: true, skipped: true, reason: 'CONTEXT.md missing', total: 0, covered: 0, uncovered: [], message: 'No CONTEXT.md - nothing to check.' }, raw, undefined);
     return;
   }
@@ -420,8 +440,11 @@ function cmdDecisionCoverageVerify(projectDir: string, args: string[], raw: bool
   }
 
   const planContents = loadPlanContents(phaseDir);
+  // #3183 (lint-plan-count-drift): same single-owner sourcing as
+  // loadPlanContents above — scanPhasePlans's summaryFiles instead of a
+  // local `-SUMMARY.md` readdirSync filter.
   const summaryParts = fs.existsSync(phaseDir)
-    ? fs.readdirSync(phaseDir).filter((entry) => /-SUMMARY\.md$/.test(entry)).map((entry) => readIfExists(path.join(phaseDir, entry)))
+    ? scanPhasePlans(phaseDir).summaryFiles.map((entry) => readIfExists(path.join(phaseDir, entry)))
     : [];
   const haystack = [
     planContents.join('\n\n'),
@@ -743,7 +766,9 @@ function cmdTddReviewCheckpoint(projectDir: string, args: string[], raw: boolean
   const tddPlanFiles: string[] = [];
   if (phaseDir) {
     try {
-      const files = fs.readdirSync(phaseDir).filter(f => f.endsWith('-PLAN.md'));
+      // #3183: canonical plan set (root+nested, superseded-excluded) from the
+      // single owner, rather than a root-only hand-rolled readdirSync filter.
+      const files = scanPhasePlans(phaseDir).planFiles;
       for (const file of files) {
         const planPath = path.join(phaseDir, file);
         const content = readIfExists(planPath);
@@ -954,9 +979,45 @@ function buildPredicateDeps() {
         stdout: r.stdout,
         stderr: r.stderr,
         signal: r.signal,
-        timedOut: r.signal === 'SIGTERM',
+        timedOut: r.timedOut,
       };
     },
+    findPhaseArtifact(phaseDir: string, artifactSuffix: string): string | null {
+      if (!fs.existsSync(phaseDir)) return null;
+      if (
+        artifactSuffix === '.' ||
+        artifactSuffix === '..' ||
+        artifactSuffix.includes('\0') ||
+        path.basename(artifactSuffix) !== artifactSuffix ||
+        path.win32.basename(artifactSuffix) !== artifactSuffix
+      ) {
+        return null;
+      }
+      const directPath = validatePath(artifactSuffix, phaseDir);
+      if (directPath.safe && fs.existsSync(directPath.resolved) && fs.statSync(directPath.resolved).isFile()) {
+        return directPath.resolved;
+      }
+      const planningPath = validatePath(path.join('.planning', artifactSuffix), phaseDir);
+      if (planningPath.safe && fs.existsSync(planningPath.resolved) && fs.statSync(planningPath.resolved).isFile()) {
+        return planningPath.resolved;
+      }
+      try {
+        const files = fs.readdirSync(phaseDir);
+        for (const f of files) {
+          if (f.endsWith('-' + artifactSuffix) || f === artifactSuffix) {
+            const candidate = validatePath(f, phaseDir);
+            if (candidate.safe && fs.statSync(candidate.resolved).isFile()) return candidate.resolved;
+          }
+        }
+      } catch { /* ignore */ }
+      return null;
+    },
+    readFrontmatter(filePath: string): Record<string, unknown> {
+      const content = platformReadSync(filePath);
+      if (content === null) throw new Error(`predicate artifact disappeared before it could be read: ${filePath}`);
+      const parsed = extractFrontmatter(content, filePath) as Record<string, unknown>;
+      return parsed;
+    }
   };
 }
 
@@ -1344,12 +1405,26 @@ function isRealReadFailure(err: unknown): boolean {
 function readPhaseScope(projectDir: string, phaseDir: string, phaseNumber: string): PhaseScopeRead {
   const chunks: string[] = [];
   let readError: string | null = null;
-  try {
-    const entries = fs.readdirSync(phaseDir, { withFileTypes: true });
-    const plans = entries
-      .filter((e) => e.isFile() && /-PLAN\.md$/i.test(e.name))
-      .map((e) => e.name)
-      .sort();
+  // A MISSING phase directory is fine (no plans yet → fall through to the
+  // roadmap). Checked up front (rather than via a readdirSync catch) because
+  // #3183 (lint-plan-count-drift) now sources the plan-file list from the
+  // single owner (scanPhasePlans) instead of a local `-PLAN\.md$` readdirSync
+  // filter — picks up bare PLAN.md and nested plans/, and excludes
+  // superseded plans, none of which the prior root-only exact-suffix filter
+  // did.
+  if (fs.existsSync(phaseDir)) {
+    const scan = scanPhasePlans(phaseDir);
+    if (scan.scope === SCOPE.UNREADABLE) {
+      // Directory exists but scanPhasePlans's own readdirSync(phaseDir) call
+      // failed (EACCES/EIO race) — a real read failure the gate must not
+      // silently pass (#2365 review), mirroring the prior isRealReadFailure
+      // branch below for the readdirSync-throws case.
+      return {
+        text: '',
+        readError: 'could not read the phase directory: scanPhasePlans reported scope UNREADABLE',
+      };
+    }
+    const plans = [...scan.planFiles].sort();
     for (const p of plans) {
       try {
         chunks.push(fs.readFileSync(path.join(phaseDir, p), 'utf8'));
@@ -1360,16 +1435,6 @@ function readPhaseScope(projectDir: string, phaseDir: string, phaseNumber: strin
           readError = `could not read ${p}: ${err instanceof Error ? err.message : String(err)}`;
         }
       }
-    }
-  } catch (err) {
-    // A MISSING phase directory is fine (no plans yet → fall through to the
-    // roadmap). A directory that exists but cannot be enumerated (EACCES/EIO)
-    // is a real read failure the gate must not silently pass (#2365 review).
-    if (isRealReadFailure(err)) {
-      return {
-        text: '',
-        readError: `could not read the phase directory: ${err instanceof Error ? err.message : String(err)}`,
-      };
     }
   }
   if (readError) return { text: chunks.join('\n\n'), readError };

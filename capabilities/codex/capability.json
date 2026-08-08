@@ -1,7 +1,7 @@
 {
   "id": "codex",
   "role": "runtime",
-  "version": "1.8.0",
+  "version": "1.10.0",
   "title": "OpenAI Codex CLI",
   "description": "OpenAI Codex CLI — shell-var command style; per-agent sandbox tiers; config.toml + hooks.json hook surface; tier-1 support.",
   "tier": "core",
@@ -38,8 +38,7 @@
           "prefix": "gsd-",
           "nesting": "flat",
           "recursive": false,
-          "converter": "convertClaudeCommandToCodexSkill",
-          "home": ".agents"
+          "converter": "convertClaudeCommandToCodexSkill"
         }
       ]
     },
@@ -77,7 +76,9 @@
     },
     "orchestratorExec": {
       "command": "codex",
-      "args": ["exec"],
+      "args": [
+        "exec"
+      ],
       "cwdFlag": "--cd",
       "promptFlag": null
     },
@@ -92,12 +93,25 @@
   },
   "reviewer": {
     "slug": "codex",
-    "flags": ["--codex"],
+    "flags": [
+      "--codex"
+    ],
     "transport": "spawn",
-    "probe": { "kind": "command-exists", "binary": "codex" },
+    "probe": {
+      "kind": "command-exists",
+      "binary": "codex"
+    },
     "invoke": {
       "binary": "codex",
-      "args": ["exec", "--ephemeral", "--skip-git-repo-check", "-"],
+      "args": [
+        "exec",
+        "--ephemeral",
+        "{{model}}",
+        "{{effort}}",
+        "--skip-git-repo-check",
+        "{{output}}",
+        "-"
+      ],
       "promptChannel": "stdin",
       "outputChannel": "file-arg",
       "outputArg": "-o",
@@ -110,6 +124,14 @@
     "evidenceClass": "source-grounded",
     "requiresBinaries": [],
     "promptBudgetKey": null,
+    "modelConfigKey": "review.models.codex",
     "handler": null
+  },
+  "config": {
+    "review.models.codex": {
+      "type": "string",
+      "default": "",
+      "description": "Model passed to the Codex reviewer lane."
+    }
   }
 }

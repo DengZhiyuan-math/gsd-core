@@ -769,12 +769,20 @@ describe('config-set <key> null — unset/clear (#2046)', () => {
       'review.models.gemini must be absent on disk after unset, not the string "null"'
     );
 
+    // #2797: review.models.<slug> is federated to its lane capability now, and a
+    // federated key always resolves to its declared default — so a cleared key
+    // reads back as the empty string (rendered `""` by the non-raw formatter)
+    // instead of erroring. The property this test actually guards is unchanged
+    // and asserted above: the key is REMOVED from disk, never persisted as the
+    // literal string "null".
     const getResult = runGsdTools('config-get review.models.gemini', tmpDir);
+    const shown = (getResult.output || '').trim();
     assert.ok(
-      !getResult.output || !getResult.output.trim() || getResult.output.trim() === 'undefined',
+      shown === '' || shown === '""' || shown === 'undefined',
       `config-get should return empty/undefined after unset, got: ${getResult.output}`
     );
-    assert.notStrictEqual(getResult.output && getResult.output.trim(), 'null');
+    assert.notStrictEqual(shown, 'null');
+    assert.notStrictEqual(shown, '"null"');
   });
 
   test('secret key: config-set brave_search null removes the key (never persists "null")', () => {
@@ -1465,8 +1473,17 @@ describe('config-set prototype-pollution guard via dynamic-key prefixes (alert #
       'features.__proto__: Object.prototype should not gain "somevalue"');
   });
 
-  test('review.models.constructor is blocked by setConfigValue guard (not schema gate)', () => {
-    const result = runGsdTools('config-set review.models.constructor somevalue', tmpDir);
+  test('agent_skills.constructor is blocked by setConfigValue guard (not schema gate)', () => {
+    // #2797: this case used `review.models.constructor`, which reached the
+    // setConfigValue guard only because the central pattern
+    // ^review\.models\.[a-zA-Z0-9_-]+$ accepted it first. That pattern is now
+    // federated to the lane capabilities and gone from the central schema, so
+    // the key is rejected at the schema gate instead (asserted separately below).
+    //
+    // The GUARD still needs coverage, so this exercises it through a surviving
+    // dynamic prefix. Losing this assertion would have quietly deleted the
+    // regression test for alert #26 rather than relocating it.
+    const result = runGsdTools('config-set agent_skills.constructor somevalue', tmpDir);
 
     assert.strictEqual(result.success, false, `Expected failure but got: ${result.output}`);
 
@@ -1480,7 +1497,19 @@ describe('config-set prototype-pollution guard via dynamic-key prefixes (alert #
     );
 
     assert.strictEqual(Object.prototype.hasOwnProperty.call(Object.prototype, 'somevalue'), false,
-      'review.models.constructor: Object.prototype should not gain "somevalue"');
+      'agent_skills.constructor: Object.prototype should not gain "somevalue"');
+  });
+
+  test('review.models.constructor is now rejected at the schema gate (#2797)', () => {
+    // Defence in depth: after federation the key never reaches setConfigValue at
+    // all, because no lane declares `review.models.constructor`. Rejecting
+    // earlier is strictly safer than rejecting later — this locks that it is
+    // still rejected, by whichever gate gets there first.
+    const result = runGsdTools('config-set review.models.constructor somevalue', tmpDir);
+
+    assert.strictEqual(result.success, false, `Expected failure but got: ${result.output}`);
+    assert.strictEqual(Object.prototype.hasOwnProperty.call(Object.prototype, 'somevalue'), false,
+      'Object.prototype must not gain "somevalue"');
   });
 
   test('positive control: agent_skills.sonnet-coder with valid value succeeds', () => {
@@ -1779,7 +1808,7 @@ describe('#3197 — gsd-tools.cjs config-set workflow._auto_chain_active', () =>
 {
   const { describe: __foldDescribe } = require('node:test');
   __foldDescribe("folded:bug-3086-git-create-tag-config-gate (consolidation epic #1969 B2 #1971)", () => {
-// allow-test-rule: workflow-markdown-is-the-runtime-contract (see #3086)
+// allow-test-rule: source-text-is-the-product (see #3086)
 // Justification: complete-milestone.md IS the runtime — the agent reads and
 // follows it directly. Asserting the <config-check> block is present in the
 // markdown is the only way to verify the gate is wired. Per CONTEXT.md L611.
@@ -1855,15 +1884,38 @@ describe('#3086: git.create_tag config key', () => {
     );
   });
 
-  test('D. complete-milestone.md contains <config-check> gate for git.create_tag', () => {
+  test('D. complete-milestone.md gates git_tag behind state:git-create-tag (#2994: <config-check> hoisted into cmdInitCompleteMilestone)', () => {
+    // #2994: the inline <config-check> (`gsd-tools.cjs query config-get
+    // git.create_tag ... || echo "true"`) that used to gate the git_tag step's
+    // own inclusion was hoisted into `detectGitCreateTag` (src/init.cts),
+    // consumed by the new `cmdInitCompleteMilestone` entry point and exposed
+    // as the init-bundle's `git_create_tag` field / the `state:git-create-tag`
+    // when= atom. The workflow markdown no longer contains a literal
+    // <config-check> block or `git.create_tag` string — it gates the whole
+    // git_tag step behind a gsd:section marker instead.
     const content = fs.readFileSync(WORKFLOW_PATH, 'utf8');
     assert.ok(
-      content.includes('git.create_tag'),
-      'complete-milestone.md must reference git.create_tag in a <config-check> block',
+      content.includes('<!-- gsd:section id="git-tag" when="state:git-create-tag" -->'),
+      'complete-milestone.md must gate the git_tag step behind the state:git-create-tag section marker',
     );
     assert.ok(
-      content.includes('<config-check>'),
-      'complete-milestone.md must have a <config-check> block in the git_tag step',
+      content.includes('gsd-core/workflows/complete-milestone/steps/git-tag.md'),
+      'complete-milestone.md must point the git-tag section at its step file',
+    );
+
+    const stepFile = fs.readFileSync(
+      path.join(__dirname, '..', 'gsd-core', 'workflows', 'complete-milestone', 'steps', 'git-tag.md'),
+      'utf8',
+    );
+    assert.ok(
+      stepFile.includes('<step name="git_tag">') && stepFile.includes('git tag -a'),
+      'git-tag.md step file must contain the git_tag step body (git tag creation)',
+    );
+
+    const initSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'init.cts'), 'utf8');
+    assert.ok(
+      /detectGitCreateTag[\s\S]{0,300}'git'[\s\S]{0,40}'create_tag'/.test(initSource),
+      'src/init.cts detectGitCreateTag must resolve the git.create_tag config key',
     );
   });
 });
@@ -2233,16 +2285,18 @@ describe('feat-3210 / H5: enum validation for code_quality.fallow.scope and .pro
   __foldDescribe("folded:bug-3212-execute-phase-stall-safe-resume (consolidation epic #1969 B3 #1972)", () => {
 'use strict';
 
-// allow-test-rule: source-text-is-product [#3212]
+// allow-test-rule: source-text-is-the-product [#3212]
 // The bug is in workflow/config contracts consumed by agents at runtime.
 
 const { describe, test } = require('node:test');
 const assert = require('node:assert/strict');
-const { spawnSync } = require('node:child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { cleanup } = require('./helpers.cjs');
+const { runNode } = require('./helpers/process-seam.cjs');
+const { toLegacyResult } = require('./helpers/git-fixture.cjs');
+const { PROBE_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
 
 const ROOT = path.join(__dirname, '..');
 
@@ -2251,10 +2305,11 @@ function read(relativePath) {
 }
 
 function runGsd(args, cwd) {
-  return spawnSync(process.execPath, [path.join(ROOT, 'gsd-core/bin/gsd-tools.cjs'), ...args], {
+  const result = runNode([path.join(ROOT, 'gsd-core/bin/gsd-tools.cjs'), ...args], {
     cwd,
-    encoding: 'utf8',
+    timeoutMs: PROBE_TIMEOUT_MS,
   });
+  return toLegacyResult(result);
 }
 
 describe('bug #3212 execute-phase stall detection and safe resume', () => {

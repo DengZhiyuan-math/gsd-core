@@ -8,8 +8,6 @@
  *   - extractOneLinerFromBody
  *   - pathExistsInternal
  *   - generateSlugInternal
- *   - filterPlanFiles
- *   - filterSummaryFiles
  *   - getPhaseFileStats
  *   - readSubdirectories
  *   - timeAgo
@@ -30,6 +28,7 @@ const path = require('node:path');
 const os = require('node:os');
 
 const coreUtils = require('../gsd-core/bin/lib/core-utils.cjs');
+const { SCOPE } = require('../gsd-core/bin/lib/planning-scope.cjs');
 const { cleanup } = require('./helpers.cjs');
 
 // ─── toPosixPath ─────────────────────────────────────────────────────────────
@@ -203,6 +202,58 @@ describe('generateSlugInternal', () => {
     assert.ok(result !== null && result.length <= 60);
   });
 
+  // ─── #2849: trailing hyphen must not survive 60-char truncation. ───────────
+  // The strip ran before .substring(0, 60), so a cut landing on a separator
+  // produced a slug ending in `-`. The strip must run after truncation.
+
+  test('#2849 — trailing hyphen is stripped after 60-char truncation', () => {
+    // 59 a's + space + "tail" → "aaaa…aaa-tail" (64 chars). Truncating at 60
+    // lands on the separator → "aaaa…aaa-" (ends in `-`) without the fix.
+    const slug = coreUtils.generateSlugInternal('a'.repeat(59) + ' tail');
+    assert.ok(slug !== null, 'slug must not be null');
+    assert.ok(!slug.endsWith('-'), `slug must not end with a hyphen; got: ${JSON.stringify(slug)}`);
+    assert.ok(slug.length <= 60, `slug must be at most 60 chars; got length ${slug?.length}`);
+    // The tail word is truncated away — the slug is the 59 a's with no separator.
+    assert.strictEqual(slug, 'a'.repeat(59));
+  });
+
+  test('#2849 — truncation landing before a separator keeps a clean boundary', () => {
+    // 58 a's + space + "b" = 60 chars exactly. Truncation keeps all 60 → "aaa…aa-b".
+    const slug = coreUtils.generateSlugInternal('a'.repeat(58) + ' b');
+    assert.ok(slug !== null);
+    assert.ok(!slug.endsWith('-'), `slug must not end with a hyphen; got: ${JSON.stringify(slug)}`);
+    assert.strictEqual(slug?.length, 60);
+    assert.strictEqual(slug, 'a'.repeat(58) + '-b');
+  });
+
+  test('#2849 — leading hyphens are still stripped after the truncation reorder', () => {
+    // Leading punctuation becomes a hyphen, then is stripped. Truncation runs
+    // after the strip; the leading-hyphen guarantee must survive the reorder.
+    const slug = coreUtils.generateSlugInternal('!!!' + 'a'.repeat(60));
+    assert.ok(slug !== null);
+    assert.ok(!slug.startsWith('-'), `slug must not start with a hyphen; got: ${JSON.stringify(slug)}`);
+    assert.ok(!slug.endsWith('-'), `slug must not end with a hyphen; got: ${JSON.stringify(slug)}`);
+    assert.ok((slug?.length ?? 0) <= 60);
+  });
+
+  test('#2849 — long Cyrillic transliterates and truncates without a trailing hyphen', () => {
+    // Transliteration expands Cyrillic; the result can exceed 60 chars and land
+    // on a separator when truncated. The post-truncation strip must still fire.
+    const slug = coreUtils.generateSlugInternal('Объект день '.repeat(10).trim());
+    assert.ok(slug !== null);
+    assert.ok(!slug.includes('Объект'), 'non-ASCII must be transliterated away');
+    assert.ok(/^[a-z0-9]+(-[a-z0-9]+)*$/.test(slug), `slug must be ASCII-only and well-formed; got: ${slug}`);
+    assert.ok(!slug.endsWith('-'), `slug must not end with a hyphen; got: ${JSON.stringify(slug)}`);
+    assert.ok((slug?.length ?? 0) <= 60);
+  });
+
+  test('#2849 — all-separator input collapses to empty, not a stray hyphen', () => {
+    // Input that is entirely separators must reduce to '' (not null, not '-'),
+    // both short and when truncated past 60 chars.
+    assert.strictEqual(coreUtils.generateSlugInternal('!!!'), '');
+    assert.strictEqual(coreUtils.generateSlugInternal('!'.repeat(70)), '');
+  });
+
   test('unicode characters are replaced with hyphens', () => {
     const result = coreUtils.generateSlugInternal('中文phase');
     assert.ok(typeof result === 'string');
@@ -212,45 +263,80 @@ describe('generateSlugInternal', () => {
   test('preserves numbers in slug', () => {
     assert.strictEqual(coreUtils.generateSlugInternal('Phase 42 Done'), 'phase-42-done');
   });
+
+  // ─── #2858 — wait, #2848: non-Latin (Cyrillic) titles must not produce an
+  // empty slug. A transliteration map is applied before the ASCII filter so the
+  // title's meaning is preserved as ASCII. Latin-script output is byte-for-byte
+  // unchanged (negative control below).
+
+  test('#2848 row 1 — Cyrillic title produces a non-empty transliterated slug', () => {
+    // Russian "Проверка гипотезы" → "proverka gipotezy" → slug.
+    const result = coreUtils.generateSlugInternal('Проверка гипотезы');
+    assert.ok(typeof result === 'string' && result.length > 0, `Cyrillic title must not produce an empty slug; got: ${JSON.stringify(result)}`);
+    assert.ok(/^[a-z0-9]+(-[a-z0-9]+)*$/.test(result), `slug must be ASCII-only and well-formed; got: ${result}`);
+    assert.strictEqual(result, 'proverka-gipotezy');
+  });
+
+  test('#2848 row 3 — Latin-script output is byte-for-byte unchanged (negative control)', () => {
+    // These must remain identical to the pre-fix outputs.
+    assert.strictEqual(coreUtils.generateSlugInternal('Hello World!'), 'hello-world');
+    assert.strictEqual(coreUtils.generateSlugInternal('Setup environment'), 'setup-environment');
+    assert.strictEqual(coreUtils.generateSlugInternal('  Hello  '), 'hello');
+    assert.strictEqual(coreUtils.generateSlugInternal('Phase 42 Done'), 'phase-42-done');
+  });
+
+  test('#2848 row 4 — multi-letter Cyrillic mappings transliterate correctly', () => {
+    // ж→zh ч→ch ш→sh щ→sch ю→yu я→ya. 'Яша Щучин' → ya-sh-a + sch-u-ch-i-n.
+    const result = coreUtils.generateSlugInternal('Яша Щучин');
+    assert.ok(result, `expected non-empty slug; got: ${result}`);
+    assert.ok(result.includes('yasha'), `я→ya + ш→sh + а→a = yasha expected; got: ${result}`);
+    assert.ok(result.includes('schuchin'), `щ→sch + у→u + ч→ch expected; got: ${result}`);
+    assert.strictEqual(result, 'yasha-schuchin');
+    // Spot-check each multi-letter mapping in isolation.
+    assert.strictEqual(coreUtils.generateSlugInternal('ж'), 'zh');
+    assert.strictEqual(coreUtils.generateSlugInternal('ч'), 'ch');
+    assert.strictEqual(coreUtils.generateSlugInternal('ш'), 'sh');
+    assert.strictEqual(coreUtils.generateSlugInternal('щ'), 'sch');
+    assert.strictEqual(coreUtils.generateSlugInternal('ю'), 'yu');
+    assert.strictEqual(coreUtils.generateSlugInternal('я'), 'ya');
+  });
+
+  test('#2848 row 5 — soft/hard signs (ъ ь) drop cleanly without hyphen runs', () => {
+    // "Объект день" — ъ and ь should disappear, NOT produce consecutive hyphens.
+    const result = coreUtils.generateSlugInternal('Объект день');
+    assert.ok(result, `expected non-empty slug; got: ${result}`);
+    assert.ok(!result.includes('--'), `no double hyphens from dropped signs; got: ${result}`);
+    assert.strictEqual(result, 'obekt-den');
+  });
+
+  test('#2848 row 6 — Ukrainian/Belarusian Cyrillic extras transliterate', () => {
+    // і ї є ґ ў — non-Russian Cyrillic letters in the reported scope.
+    assert.strictEqual(coreUtils.generateSlugInternal('і'), 'i');
+    assert.strictEqual(coreUtils.generateSlugInternal('ї'), 'yi');
+    assert.strictEqual(coreUtils.generateSlugInternal('є'), 'ye');
+    assert.strictEqual(coreUtils.generateSlugInternal('ґ'), 'g');
+    assert.strictEqual(coreUtils.generateSlugInternal('ў'), 'u');
+  });
+
+  test('#2848 row 7 — null/undefined/empty still return null (contract preserved)', () => {
+    assert.strictEqual(coreUtils.generateSlugInternal(null), null);
+    assert.strictEqual(coreUtils.generateSlugInternal(undefined), null);
+    assert.strictEqual(coreUtils.generateSlugInternal(''), null);
+  });
+
+  test('#2848 row 9 — mixed Latin+Cyrillic title transliterates correctly', () => {
+    assert.strictEqual(coreUtils.generateSlugInternal('Phase Фаза 42'), 'phase-faza-42');
+  });
+
+  test('#2848 row 10 — truncation still applies after transliteration (≤60 chars)', () => {
+    // A long Cyrillic title transliterates to a longer ASCII string; the 60-char
+    // cap must still bind the result.
+    const long = 'Проверка'.repeat(20);
+    const result = coreUtils.generateSlugInternal(long);
+    assert.ok(result !== null && result.length <= 60, `truncation must still apply; got len ${result && result.length}`);
+  });
 });
 
-// ─── filterPlanFiles ──────────────────────────────────────────────────────────
-
-describe('filterPlanFiles', () => {
-  test('returns only PLAN.md and *-PLAN.md files', () => {
-    const files = ['PLAN.md', '01-PLAN.md', 'SUMMARY.md', 'README.md', 'foo-PLAN.md'];
-    assert.deepEqual(coreUtils.filterPlanFiles(files), ['PLAN.md', '01-PLAN.md', 'foo-PLAN.md']);
-  });
-
-  test('empty array → empty array', () => {
-    assert.deepEqual(coreUtils.filterPlanFiles([]), []);
-  });
-
-  test('no matching files → empty array', () => {
-    assert.deepEqual(coreUtils.filterPlanFiles(['SUMMARY.md', 'CONTEXT.md']), []);
-  });
-
-  test('case-sensitive: plan.md is not matched', () => {
-    assert.deepEqual(coreUtils.filterPlanFiles(['plan.md', 'Plan.md']), []);
-  });
-});
-
-// ─── filterSummaryFiles ───────────────────────────────────────────────────────
-
-describe('filterSummaryFiles', () => {
-  test('returns only SUMMARY.md and *-SUMMARY.md files', () => {
-    const files = ['SUMMARY.md', '01-SUMMARY.md', 'PLAN.md', 'foo-SUMMARY.md'];
-    assert.deepEqual(coreUtils.filterSummaryFiles(files), ['SUMMARY.md', '01-SUMMARY.md', 'foo-SUMMARY.md']);
-  });
-
-  test('empty array → empty array', () => {
-    assert.deepEqual(coreUtils.filterSummaryFiles([]), []);
-  });
-
-  test('no matching files → empty array', () => {
-    assert.deepEqual(coreUtils.filterSummaryFiles(['PLAN.md', 'CONTEXT.md']), []);
-  });
-});
 
 // ─── readSubdirectories ───────────────────────────────────────────────────────
 
@@ -368,6 +454,36 @@ describe('getPhaseFileStats', () => {
     fs.writeFileSync(path.join(tmpDir, 'CONTEXT.md'), '');
     const stats = coreUtils.getPhaseFileStats(tmpDir);
     assert.strictEqual(stats.hasContext, true);
+  });
+
+  // ─── #3183 (ADR-3180 Decision 2): scope field + degrade-not-throw ─────────
+
+  test('#3183 row 17: scope is COMPLETE for a readable, empty phase dir', () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-cu-test-'));
+    const stats = coreUtils.getPhaseFileStats(tmpDir);
+    assert.strictEqual(stats.scope, SCOPE.COMPLETE);
+  });
+
+  test('#3183 row 15: scope is UNREADABLE and getPhaseFileStats does not throw for a nonexistent dir', () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-cu-test-'));
+    const missing = path.join(tmpDir, 'does-not-exist');
+    assert.doesNotThrow(() => coreUtils.getPhaseFileStats(missing));
+    const stats = coreUtils.getPhaseFileStats(missing);
+    assert.strictEqual(stats.scope, SCOPE.UNREADABLE);
+    assert.deepEqual(stats.plans, []);
+    assert.deepEqual(stats.summaries, []);
+    assert.strictEqual(stats.hasResearch, false);
+    assert.strictEqual(stats.hasContext, false);
+    assert.strictEqual(stats.hasVerification, false);
+    assert.strictEqual(stats.hasReviews, false);
+  });
+
+  test('#3183 row 7 regression: nested plans/PLAN-01.md ONLY is reported (used to report 0)', () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-cu-test-'));
+    fs.mkdirSync(path.join(tmpDir, 'plans'));
+    fs.writeFileSync(path.join(tmpDir, 'plans', 'PLAN-01.md'), '# Plan\n');
+    const stats = coreUtils.getPhaseFileStats(tmpDir);
+    assert.deepEqual(stats.plans, ['plans/PLAN-01.md']);
   });
 });
 
