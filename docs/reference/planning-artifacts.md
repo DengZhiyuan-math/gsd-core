@@ -19,6 +19,7 @@ The `.planning/` directory is GSD Core's shared memory for a project. Every work
 ├── DECISIONS-INDEX.md                  # Rolling summary of prior decisions (optional)
 ├── METHODOLOGY.md                      # Reusable interpretive frameworks (optional)
 ├── HANDOFF.json                        # Machine-readable pause state (transient)
+├── state.json                          # Machine-readable state snapshot (derived, State Contract v1)
 ├── codebase/                           # Codebase maps (optional)
 │   ├── architecture.md
 │   ├── stack.md
@@ -122,6 +123,16 @@ See [CONFIGURATION](../CONFIGURATION.md) for the complete schema.
 | **Purpose** | Machine-readable pause state written when work is interrupted. Contains the resume point, in-progress context, and continuation instructions. Consumed exactly once — on resume. |
 | **Produced by** | `/gsd-pause-work`. |
 | **Consumed by** | `/gsd-resume-work`. |
+
+### `state.json` (derived)
+
+| | |
+|---|---|
+| **Purpose** | Machine-readable snapshot of project state (GSD State Contract v1, `contract: "1.0.0"`): milestone display string, current-milestone `phases[]`, the recommended `next` action, and `updated_at`. Exists so external readers consume structured state instead of parsing `STATE.md` / `ROADMAP.md`. Derived output — safe to delete, republished at the next step boundary. |
+| **Produced by** | `state begin-phase` / `advance-plan` / `planned-phase` / `complete-phase` / `milestone-switch`; `phase add` / `add-batch` / `insert` / `remove` / `complete`; `milestone complete`. Writes are best-effort and never fail the parent command. |
+| **Consumed by** | External readers only (e.g. GSD Workbench). No GSD workflow reads it. |
+
+See [`state.json` contract](state-json.md) for the full field reference.
 
 ---
 
@@ -291,6 +302,7 @@ When `project_code` is set in `config.json`, phase directories use the project c
 ## Related
 
 - [STATE.md schema](state-md.md)
+- [`state.json` contract](state-json.md)
 - [CONTEXT.md schema](context-md.md)
 - [PLAN.md schema](plan-md.md)
 - [docs index](../README.md)
