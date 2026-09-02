@@ -14,9 +14,10 @@ const os = require('os');
 
 const { writeSurface, readSurface, resolveSurface, listSurface, applySurface } = require('../gsd-core/bin/lib/surface.cjs');
 const { loadSkillsManifest, writeActiveProfile, resolveProfile } = require('../gsd-core/bin/lib/install-profiles.cjs');
-const { resolveRuntimeArtifactLayout } = require('../gsd-core/bin/lib/runtime-artifact-layout.cjs');
+const { resolveRuntimeArtifactLayout, resolveRuntimeArtifactLayoutForInstall } = require('../gsd-core/bin/lib/runtime-artifact-layout.cjs');
 const { CLUSTERS, allClusteredSkills } = require('../gsd-core/bin/lib/clusters.cjs');
 const { createTempDir, cleanup, sandboxHome } = require('./helpers.cjs');
+const { runMinimalInstall } = require('./helpers/install-shared.cjs');
 
 const REAL_COMMANDS_DIR = path.join(__dirname, '..', 'commands', 'gsd');
 
@@ -34,6 +35,7 @@ function createFixtureRuntime() {
   const agentsDir = path.join(runtimeConfigDir, 'agents');
   fs.mkdirSync(commandsDir, { recursive: true });
   fs.mkdirSync(agentsDir, { recursive: true });
+  fs.writeFileSync(path.join(runtimeConfigDir, '.gsd-source'), REAL_COMMANDS_DIR + '\n');
   return { base, runtimeConfigDir, commandsDir, agentsDir };
 }
 
@@ -54,6 +56,10 @@ function readFrontmatterDescription(markdown) {
     return line.slice(sep + 1).trim();
   }
   return '';
+}
+
+function surfaceBytesForTest(state) {
+  return JSON.stringify(state, null, 2) + '\n';
 }
 
 // ─── applySurface ────────────────────────────────────────────────────────────
@@ -334,7 +340,7 @@ describe('applySurface', () => {
     });
 
     // Determine the command dest dir for opencode: commandsKind destSubpath='commands' (#2329)
-    const layout = resolveRuntimeArtifactLayout('opencode', configDir, 'global');
+    const layout = resolveRuntimeArtifactLayoutForInstall('opencode', configDir, 'global');
     const commandsKind = layout.kinds.find(k => k.kind === 'commands');
     assert.ok(commandsKind, 'opencode layout must have a commands kind');
     const commandDir = path.join(configDir, commandsKind.destSubpath);
@@ -418,7 +424,7 @@ describe('applySurface', () => {
         explicitAdds: [],
         explicitRemoves: [],
       });
-      const layout = resolveRuntimeArtifactLayout(runtime, surfaceDir, 'global');
+      const layout = resolveRuntimeArtifactLayoutForInstall(runtime, surfaceDir, 'global');
       applySurface(surfaceDir, layout, manifest, CLUSTERS);
 
       // --- Find commands kind ---
@@ -531,6 +537,118 @@ describe('applySurface', () => {
       );
     });
   }
+
+  test('#4132: a later kind staging failure leaves exact all-old state and artifacts', (t) => {
+    const root = createTempDir('gsd-surface-stage-failure-');
+    t.after(() => cleanup(root));
+    const firstDest = path.join(root, 'first');
+    const secondDest = path.join(root, 'second');
+    fs.mkdirSync(firstDest, { recursive: true });
+    fs.mkdirSync(secondDest, { recursive: true });
+    fs.writeFileSync(path.join(firstDest, 'gsd-alpha.md'), 'old alpha\n');
+    fs.writeFileSync(path.join(secondDest, 'gsd-beta.md'), 'old beta\n');
+    const stagedFirst = path.join(root, 'staged-first');
+    fs.mkdirSync(stagedFirst);
+    fs.writeFileSync(path.join(stagedFirst, 'alpha.md'), 'new alpha\n');
+    const oldSurface = surfaceBytesForTest({ baseProfile: 'full', disabledClusters: [], explicitAdds: [], explicitRemoves: [] });
+    fs.writeFileSync(path.join(root, '.gsd-surface.json'), oldSurface);
+    const layout = {
+      runtime: 'claude', configDir: root, scope: 'local', kinds: [
+        { kind: 'commands', destSubpath: 'first', prefix: 'gsd-', stage: () => stagedFirst },
+        { kind: 'commands', destSubpath: 'second', prefix: 'gsd-', stage: () => { throw new Error('later stage failed'); } },
+      ],
+    };
+
+    assert.throws(() => applySurface(root, layout, new Map([['alpha', []], ['beta', []]])), /later stage failed/);
+    assert.equal(fs.readFileSync(path.join(firstDest, 'gsd-alpha.md'), 'utf8'), 'old alpha\n');
+    assert.equal(fs.readFileSync(path.join(secondDest, 'gsd-beta.md'), 'utf8'), 'old beta\n');
+    assert.equal(fs.readFileSync(path.join(root, '.gsd-surface.json'), 'utf8'), oldSurface);
+  });
+
+  test('#4132: a hash-mismatched installed corpus leaves exact all-old state and artifacts', (t) => {
+    const root = createTempDir('gsd-surface-corrupt-corpus-');
+    t.after(() => cleanup(root));
+    const installedCommands = path.join(root, 'gsd-core', 'commands', 'gsd');
+    const installedAgents = path.join(root, 'gsd-core', 'agents');
+    fs.mkdirSync(installedCommands, { recursive: true });
+    fs.mkdirSync(installedAgents, { recursive: true });
+    fs.writeFileSync(path.join(installedCommands, 'help.md'), '# corrupted command\n');
+    fs.writeFileSync(path.join(installedAgents, 'gsd-planner.md'), '# corrupted agent\n');
+    fs.writeFileSync(path.join(root, 'gsd-file-manifest.json'), JSON.stringify({ files: {
+      'gsd-core/commands/gsd/help.md': '0'.repeat(64),
+      'gsd-core/agents/gsd-planner.md': '0'.repeat(64),
+    } }));
+
+    const skillPath = path.join(root, 'skills', 'gsd-help', 'SKILL.md');
+    const agentPath = path.join(root, 'agents', 'gsd-planner.md');
+    fs.mkdirSync(path.dirname(skillPath), { recursive: true });
+    fs.mkdirSync(path.dirname(agentPath), { recursive: true });
+    fs.writeFileSync(skillPath, 'old skill\n');
+    fs.writeFileSync(agentPath, 'old agent\n');
+    const oldState = { baseProfile: 'full', disabledClusters: [], explicitAdds: [], explicitRemoves: [] };
+    const candidate = { ...oldState, explicitRemoves: ['help'] };
+    const oldSurface = surfaceBytesForTest(oldState);
+    fs.writeFileSync(path.join(root, '.gsd-surface.json'), oldSurface);
+
+    const layout = resolveRuntimeArtifactLayout('claude', root, 'global');
+    assert.throws(
+      () => applySurface(root, layout, realManifest(), CLUSTERS, undefined, { surfaceState: candidate }),
+      /install or upgrade gsd-core/,
+    );
+    assert.equal(fs.readFileSync(skillPath, 'utf8'), 'old skill\n');
+    assert.equal(fs.readFileSync(agentPath, 'utf8'), 'old agent\n');
+    assert.equal(fs.readFileSync(path.join(root, '.gsd-surface.json'), 'utf8'), oldSurface);
+  });
+
+  test('#4132: candidate surface state is published after materialization', (t) => {
+    const root = createTempDir('gsd-surface-state-last-');
+    t.after(() => cleanup(root));
+    const dest = path.join(root, 'commands');
+    const staged = path.join(root, 'staged');
+    fs.mkdirSync(dest, { recursive: true });
+    fs.mkdirSync(staged);
+    fs.writeFileSync(path.join(dest, 'gsd-alpha.md'), 'old alpha\n');
+    fs.writeFileSync(path.join(staged, 'alpha.md'), 'new alpha\n');
+    const oldState = { baseProfile: 'full', disabledClusters: [], explicitAdds: [], explicitRemoves: [] };
+    const newState = { ...oldState, disabledClusters: ['ui'] };
+    writeSurface(root, oldState);
+    const layout = {
+      runtime: 'claude', configDir: root, scope: 'local', kinds: [
+        { kind: 'commands', destSubpath: 'commands', prefix: 'gsd-', stage: () => {
+          assert.deepEqual(readSurface(root), oldState, 'candidate must not be visible while staging');
+          return staged;
+        } },
+      ],
+    };
+
+    applySurface(root, layout, new Map([['alpha', []]]), undefined, undefined, { surfaceState: newState });
+
+    assert.equal(fs.readFileSync(path.join(dest, 'gsd-alpha.md'), 'utf8'), 'new alpha\n');
+    assert.deepEqual(readSurface(root), newState);
+  });
+
+  test('#4132: reset removes surface state after materialization', (t) => {
+    const root = createTempDir('gsd-surface-reset-state-last-');
+    t.after(() => cleanup(root));
+    const dest = path.join(root, 'commands');
+    const staged = path.join(root, 'staged');
+    fs.mkdirSync(dest, { recursive: true });
+    fs.mkdirSync(staged);
+    fs.writeFileSync(path.join(staged, 'alpha.md'), 'reset alpha\n');
+    writeActiveProfile(root, 'full');
+    writeSurface(root, { baseProfile: 'core', disabledClusters: ['ui'], explicitAdds: [], explicitRemoves: [] });
+    const layout = {
+      runtime: 'claude', configDir: root, scope: 'local', kinds: [
+        { kind: 'commands', destSubpath: 'commands', prefix: 'gsd-', stage: () => staged },
+      ],
+    };
+
+    applySurface(root, layout, new Map([['alpha', []]]), undefined, undefined, { surfaceState: null });
+
+    assert.equal(fs.existsSync(path.join(root, '.gsd-surface.json')), false);
+    assert.equal(fs.readFileSync(path.join(dest, 'gsd-alpha.md'), 'utf8'), 'reset alpha\n');
+  });
+
 });
 
 // ─── resolveSurface ──────────────────────────────────────────────────────────
@@ -1205,7 +1323,7 @@ describe('skills-kind destination parity: installer vs surface-apply (#2911)', (
         withFakeHome(fakeHome, () => {
           let layout;
           try {
-            layout = resolveRuntimeArtifactLayout(runtime, configDir, scope);
+            layout = resolveRuntimeArtifactLayoutForInstall(runtime, configDir, scope);
           } catch {
             return; // runtime/scope combination not supported
           }
@@ -1305,7 +1423,7 @@ describe('codex skills-kind destination: home override (#2911)', () => {
         explicitAdds: [],
         explicitRemoves: [],
       });
-      const layout = resolveRuntimeArtifactLayout('codex', codexHome, 'global');
+      const layout = resolveRuntimeArtifactLayoutForInstall('codex', codexHome, 'global');
       const skillsKind = layout.kinds.find((k) => k.kind === 'skills');
       assert.ok(skillsKind, 'pre-condition: codex global layout has a skills kind');
       assert.strictEqual(skillsKind.home, path.join(fakeHome, '.agents'), 'pre-condition: codex skills kind declares the $HOME/.agents override');
@@ -1377,7 +1495,7 @@ describe('installOpencodeFamilySkills destination parity (#2911 sibling coverage
   const runtimeArtifactLayoutModule = require('../gsd-core/bin/lib/runtime-artifact-layout.cjs');
 
   function stageRawCommands(runtime, configDir) {
-    const layout = resolveRuntimeArtifactLayout(runtime, configDir, 'global');
+    const layout = resolveRuntimeArtifactLayoutForInstall(runtime, configDir, 'global');
     const commandsKind = layout.kinds.find((k) => k.kind === 'commands');
     return commandsKind.stage(resolveProfile({ modes: ['core'], manifest: loadSkillsManifest(REAL_COMMANDS_DIR) }));
   }
@@ -1458,15 +1576,12 @@ describe('installOpencodeFamilySkills destination parity (#2911 sibling coverage
 // flat layout is preserved (not re-nested) rather than a nested one.
 describe('issue-69: applySurface preserves nested skill layout (no re-flatten)', () => {
   test('cline global full: applySurface keeps 6 router dirs and nested gsd-ns-manage/skills/help/SKILL.md', (t) => {
-    process.env.GSD_TEST_MODE = '1';
-    const { installRuntimeArtifacts } = require('../gsd-core/bin/lib/install-engine.cjs');
-    const dir = tmpDir('gsd-69-surface-');
-    t.after(() => { try { cleanup(dir); } catch { /* best-effort */ } });
+    const installed = runMinimalInstall({ runtime: 'cline', scope: 'global' });
+    const dir = installed.configDir;
+    t.after(() => { try { cleanup(installed.root); } catch { /* best-effort */ } });
 
     // Step 1: full install
     const manifest = loadSkillsManifest(REAL_COMMANDS_DIR);
-    const resolved = resolveProfile({ modes: ['full'], manifest });
-    installRuntimeArtifacts('cline', dir, 'global', resolved);
 
     const skillsDir = path.join(dir, 'skills');
 
@@ -1510,14 +1625,11 @@ describe('issue-69: applySurface preserves nested skill layout (no re-flatten)',
 
   // #924 companion: Claude must use FLAT layout and applySurface must NOT re-nest it.
   test('claude global full: install produces flat layout and applySurface preserves it (#924)', (t) => {
-    process.env.GSD_TEST_MODE = '1';
-    const { installRuntimeArtifacts } = require('../gsd-core/bin/lib/install-engine.cjs');
-    const dir = tmpDir('gsd-924-69-');
-    t.after(() => { try { cleanup(dir); } catch { /* best-effort */ } });
+    const installed = runMinimalInstall({ runtime: 'claude', scope: 'global' });
+    const dir = installed.configDir;
+    t.after(() => { try { cleanup(installed.root); } catch { /* best-effort */ } });
 
     const manifest = loadSkillsManifest(REAL_COMMANDS_DIR);
-    const resolved = resolveProfile({ modes: ['full'], manifest });
-    installRuntimeArtifacts('claude', dir, 'global', resolved);
 
     const skillsDir = path.join(dir, 'skills');
 

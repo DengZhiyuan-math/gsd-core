@@ -68,6 +68,116 @@ const { getDirName } = runtimeNamePolicy;
 
 type ResolveAttribution = (runtime: string) => any;
 
+type RuntimeSurfaceSourceClass = 'commands' | 'agents';
+
+function assertCorpusTreeHasNoSymlinks(root: string): void {
+  if (!installFs().existsSync(root)) return;
+  const stat = installFs().lstatSync(root);
+  if (stat.isSymbolicLink()) {
+    throw new Error(`Runtime Surface corpus path is a symlink: ${root}`);
+  }
+  if (!stat.isDirectory()) return;
+  for (const name of installFs().readdirSync(root)) {
+    assertCorpusTreeHasNoSymlinks(path.join(root, name));
+  }
+}
+
+function previousOwnedCorpusFiles(configDir: string, prefix: string): string[] {
+  const manifestPath = path.join(configDir, 'gsd-file-manifest.json');
+  try {
+    const parsed = JSON.parse(installFs().readFileSync(manifestPath, 'utf8'));
+    if (!parsed || typeof parsed.files !== 'object' || parsed.files === null) return [];
+    return Object.keys(parsed.files)
+      .filter((entry) => entry.startsWith(prefix))
+      .map((entry) => entry.slice(prefix.length))
+      .filter((entry) => entry !== '' && !path.posix.isAbsolute(entry) && !entry.split('/').some((part) => part === '' || part === '.' || part === '..'));
+  } catch {
+    // An absent or unreadable prior manifest provides no ownership evidence.
+    // Preserve existing entries rather than guessing that they are stale.
+    return [];
+  }
+}
+
+function pruneEmptyCorpusParents(start: string, stop: string): void {
+  let current = path.dirname(start);
+  while (current !== stop && current.startsWith(stop + path.sep)) {
+    if (installFs().readdirSync(current).length > 0) return;
+    installFs().rmdirSync(current);
+    current = path.dirname(current);
+  }
+}
+
+function syncRuntimeSurfaceCorpus(source: string, destination: string, configDir: string, manifestPrefix: string): void {
+  assertCorpusTreeHasNoSymlinks(destination);
+
+  // Remove only paths the previous manifest proves GSD owned and which the
+  // executing package no longer ships. Unknown neighbouring files survive.
+  for (const relative of previousOwnedCorpusFiles(configDir, manifestPrefix)) {
+    const sourceEntry = path.join(source, ...relative.split('/'));
+    let sourceIsFile = false;
+    try {
+      sourceIsFile = installFs().lstatSync(sourceEntry).isFile();
+    } catch {
+      sourceIsFile = false;
+    }
+    if (sourceIsFile) continue;
+
+    const target = path.join(destination, ...relative.split('/'));
+    if (!installFs().existsSync(target)) continue;
+    const targetStat = installFs().lstatSync(target);
+    if (!targetStat.isFile()) {
+      throw new Error(`Runtime Surface corpus ownership conflict at ${target}`);
+    }
+    installFs().rmSync(target, { force: true });
+    pruneEmptyCorpusParents(target, destination);
+  }
+
+  installFs().mkdirSync(path.dirname(destination), { recursive: true });
+  installFs().cpSync(source, destination, { recursive: true });
+}
+
+/**
+ * Provision the raw, installation-owned input needed to re-materialize a
+ * global Runtime Surface after the executing package tree disappears.
+ *
+ * The corpus deliberately lives below the already-installed `gsd-core/`
+ * tree. That placement satisfies runtime-artifact-layout's existing upward
+ * source walk, so callers keep one resolver and one transformation pipeline.
+ */
+function provisionRuntimeSurfaceCorpus(layout: any, configDir: string, scope: string): void {
+  const required = isGlobalScope(scope as InstallScope)
+    ? runtimeArtifactLayout.requiredRuntimeSurfaceSourceClasses(layout.kinds ?? []) as Set<RuntimeSurfaceSourceClass>
+    : new Set<RuntimeSurfaceSourceClass>();
+  if (required.size === 0) return;
+
+  const corpusRoot = path.join(configDir, 'gsd-core');
+  if (required.has('commands')) {
+    const source = runtimeArtifactLayout.findInstallSourceRoot();
+    const destination = path.join(corpusRoot, 'commands', 'gsd');
+    syncRuntimeSurfaceCorpus(source, destination, configDir, 'gsd-core/commands/gsd/');
+  }
+  if (required.has('agents')) {
+    const source = runtimeArtifactLayout.findAgentsSourceRoot();
+    const destination = path.join(corpusRoot, 'agents');
+    syncRuntimeSurfaceCorpus(source, destination, configDir, 'gsd-core/agents/');
+  }
+
+  const markerFile = _hostBehaviors(layout.runtime).sourceMarkerFile;
+  if (typeof markerFile === 'string' && markerFile !== '' && required.has('commands')) {
+    try {
+      installFs().writeFileSync(
+        path.join(configDir, markerFile),
+        path.join(corpusRoot, 'commands', 'gsd') + '\n',
+        'utf8',
+      );
+    } catch {
+      // The existing installer marker writer owns the user-facing warning and
+      // keeps marker failure non-fatal. The installed corpus remains usable
+      // without the compatibility marker.
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // USER_OWNED_ARTIFACTS
 // ---------------------------------------------------------------------------
@@ -1042,9 +1152,15 @@ function installRuntimeArtifacts(
   resolvedProfile: any,
   resolveAttribution: ResolveAttribution = () => undefined,
   capabilityRegistry?: any,
-  deps: { fs?: any; os?: any; env?: Record<string, string | undefined> } = {},
+  deps: { fs?: any; os?: any; env?: Record<string, string | undefined>; packageRoot?: string } = {},
 ): any {
   return withInstallFs(deps.fs, (): any => {
+    const layout = runtimeArtifactLayout.resolveRuntimeArtifactLayoutForInstall(
+      runtime,
+      configDir,
+      scope as 'global' | 'local',
+      capabilityRegistry,
+    );
     // A removed descriptor kind is no longer visited by the layout loop, so it
     // cannot prune its own previous output. Clean manifest-proven retired files
     // before materializing the current layout (#2644).
@@ -1063,13 +1179,27 @@ function installRuntimeArtifacts(
       // #2874 design row 2: this early return must ALSO return an executed
       // plan — installOpencodeFamilyArtifacts reports what it wrote, so a
       // whole runtime family returning undefined is no longer a hole.
-      return installOpencodeFamilyArtifacts(runtime, configDir, scope, resolvedProfile, resolveAttribution, behaviors, capabilityRegistry);
+      // An injected filesystem supplies its own hermetic corpus fixture. The
+      // real installer is the authority that refreshes package bytes into the
+      // durable installed corpus; attempting that cross-filesystem copy through
+      // an in-memory destination adapter would read from the wrong filesystem.
+      if (!deps.fs) provisionRuntimeSurfaceCorpus(layout, configDir, scope);
+      return installOpencodeFamilyArtifacts(
+        runtime,
+        configDir,
+        scope,
+        resolvedProfile,
+        resolveAttribution,
+        behaviors,
+        capabilityRegistry,
+        deps.packageRoot,
+      );
     }
 
     // Legacy cleanup before layout-driven writes
     _runLegacyInstallMigrations(runtime, configDir, scope);
 
-    const layout = runtimeArtifactLayout.resolveRuntimeArtifactLayout(runtime, configDir, scope as 'global' | 'local', capabilityRegistry);
+    if (!deps.fs) provisionRuntimeSurfaceCorpus(layout, configDir, scope);
     // #3712: a global `home` override escapes the sandboxed configDir. Refuse to
     // execute when a test run would land that escape in the developer's real home.
     testHomeGuard.assertTestHomeSandboxed('installRuntimeArtifacts', runtime, layout?.kinds, {
@@ -1250,8 +1380,10 @@ function installRuntimeArtifacts(
     // is safe even when configDir has no .gsd-source marker (artifactLayout: []).
     let nativePluginInstalled = false;
     if (behaviors.nativePlugin) {
-      const commandsGsdDir = runtimeArtifactLayout.findInstallSourceRoot(configDir);
-      const src = path.dirname(path.dirname(commandsGsdDir));
+      // Native plugin sources live only in the executing package, never in the
+      // durable Runtime Surface corpus. Do not derive this package root from a
+      // config-scoped provider that may now correctly resolve installed input.
+      const src = deps.packageRoot ?? path.dirname(path.dirname(runtimeArtifactLayout.findInstallSourceRoot()));
       _installNativePluginIfDeclared(runtime, configDir, behaviors, src);
       nativePluginInstalled = true;
     }
@@ -1492,7 +1624,7 @@ function installAgentsKindStandalone(
   resolveAttribution: ResolveAttribution = () => undefined,
   capabilityRegistry?: any,
 ): { sourceDir: string; destDir: string } | null {
-  const layout: any = runtimeArtifactLayout.resolveRuntimeArtifactLayout(runtime, targetDir, scope as 'global' | 'local', capabilityRegistry);
+  const layout: any = runtimeArtifactLayout.resolveRuntimeArtifactLayoutForInstall(runtime, targetDir, scope as 'global' | 'local', capabilityRegistry);
   const agentsKindEntry = layout.kinds.find((k: any) => k.kind === 'agents');
   if (!agentsKindEntry) return null;
   // #3712: this writer selects `agentsKindEntry.home` over targetDir below and then
@@ -1805,6 +1937,7 @@ function installOpencodeFamilyArtifacts(
   resolveAttribution: ResolveAttribution = () => undefined,
   behaviors: any = {},
   capabilityRegistry?: any,
+  packageRoot?: string,
 ): any {
   // #2870: `scope` keeps its exported required `string` signature (no
   // signature change). It is always the `installRuntimeArtifacts`-forwarded
@@ -1818,7 +1951,7 @@ function installOpencodeFamilyArtifacts(
   // into stageSkillsForProfile/stageSkillsForRuntimeAsSkills. The repo/package
   // root (needed below for the native plugin source) is two levels up.
   const commandsGsdDir = runtimeArtifactLayout.findInstallSourceRoot(configDir);
-  const src = path.dirname(path.dirname(commandsGsdDir));
+  const src = packageRoot ?? path.dirname(path.dirname(runtimeArtifactLayout.findInstallSourceRoot()));
   const rawCommandsDir = installProfiles.stageSkillsForProfile(commandsGsdDir, resolvedProfile);
 
   const pathPrefix = (runtimeArtifactConversion as any)._computePathPrefix({
@@ -1977,6 +2110,7 @@ function uninstallRuntimeArtifacts(
 
 export = {
   installRuntimeArtifacts,
+  provisionRuntimeSurfaceCorpus,
   uninstallRuntimeArtifacts,
   installOpencodeFamilySkills,
   installOpencodeFamilyCommands,

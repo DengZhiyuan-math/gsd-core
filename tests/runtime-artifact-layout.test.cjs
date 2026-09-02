@@ -21,8 +21,9 @@ const { test, describe, beforeEach, afterEach, mock } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('node:crypto');
 
-const { resolveRuntimeArtifactLayout, findInstallSourceRoot } = require('../gsd-core/bin/lib/runtime-artifact-layout.cjs');
+const { resolveRuntimeArtifactLayout, resolveRuntimeArtifactLayoutForInstall, findInstallSourceRoot } = require('../gsd-core/bin/lib/runtime-artifact-layout.cjs');
 const capabilityRegistry = require('../gsd-core/bin/lib/capability-registry.cjs');
 const installProfiles = require('../gsd-core/bin/lib/install-profiles.cjs');
 const { install } = require('../bin/install.js');
@@ -537,7 +538,7 @@ const FAKE_STAGE_DIR = '/tmp/fake-config-dir-stage';
 
 describe('stage — agents kind (claude local)', () => {
   test('stage returns a valid directory for the agents kind', () => {
-    const layout = resolveRuntimeArtifactLayout('claude', FAKE_STAGE_DIR, 'local');
+    const layout = resolveRuntimeArtifactLayoutForInstall('claude', FAKE_STAGE_DIR, 'local');
     const agentsKind = layout.kinds.find(k => k.kind === 'agents');
     assert.ok(agentsKind, 'should have an agents kind');
 
@@ -548,8 +549,39 @@ describe('stage — agents kind (claude local)', () => {
 });
 
 describe('stage — skills kind (claude global)', () => {
+  test('#4132: installer layout freezes executing-package bytes over an old installed corpus', (t) => {
+    const configDir = createTempDir('gsd-4132-installer-source-');
+    t.after(() => cleanup(configDir));
+    const installedCommands = path.join(configDir, 'gsd-core', 'commands', 'gsd');
+    const installedAgents = path.join(configDir, 'gsd-core', 'agents');
+    fs.mkdirSync(installedCommands, { recursive: true });
+    fs.mkdirSync(installedAgents, { recursive: true });
+    fs.writeFileSync(path.join(installedCommands, 'help.md'), 'OLD INSTALLED COMMAND\n');
+    fs.writeFileSync(path.join(installedAgents, 'gsd-planner.md'), 'OLD INSTALLED AGENT\n');
+
+    const layout = resolveRuntimeArtifactLayoutForInstall('claude', configDir, 'global');
+    const skillsKind = layout.kinds.find(k => k.kind === 'skills');
+    const agentsKind = layout.kinds.find(k => k.kind === 'agents');
+    assert.ok(skillsKind);
+    assert.ok(agentsKind);
+
+    const stagedSkills = skillsKind.stage(PROFILE_CORE);
+    const stagedAgents = agentsKind.stage(PROFILE_CORE);
+    t.after(() => cleanup(stagedSkills));
+    t.after(() => cleanup(stagedAgents));
+
+    assert.match(
+      fs.readFileSync(path.join(stagedSkills, 'gsd-help', 'SKILL.md'), 'utf8'),
+      /Show available GSD commands and usage guide/,
+    );
+    assert.doesNotMatch(
+      fs.readFileSync(path.join(stagedAgents, 'gsd-planner.md'), 'utf8'),
+      /OLD INSTALLED AGENT/,
+    );
+  });
+
   test('stage returns a directory containing gsd-<stem>/SKILL.md entries', () => {
-    const layout = resolveRuntimeArtifactLayout('claude', FAKE_STAGE_DIR, 'global');
+    const layout = resolveRuntimeArtifactLayoutForInstall('claude', FAKE_STAGE_DIR, 'global');
     const skillsKind = layout.kinds.find(k => k.kind === 'skills');
     assert.ok(skillsKind, 'should have a skills kind');
 
@@ -565,7 +597,7 @@ describe('stage — skills kind (claude global)', () => {
   });
 
   test('stage with skills="*" produces flat layout for claude (#924: reverted from nested)', () => {
-    const layout = resolveRuntimeArtifactLayout('claude', FAKE_STAGE_DIR, 'global');
+    const layout = resolveRuntimeArtifactLayoutForInstall('claude', FAKE_STAGE_DIR, 'global');
     const skillsKind = layout.kinds.find(k => k.kind === 'skills');
     assert.ok(skillsKind, 'should have a skills kind');
 
@@ -593,7 +625,7 @@ describe('stage — skills kind (claude global)', () => {
 
 describe('stage — skills kind (kimi global)', () => {
   test('stage returns Kimi SKILL.md dirs and agent YAML/prompt artifacts', () => {
-    const layout = resolveRuntimeArtifactLayout('kimi', FAKE_STAGE_DIR, 'global');
+    const layout = resolveRuntimeArtifactLayoutForInstall('kimi', FAKE_STAGE_DIR, 'global');
     const skillsKind = layout.kinds.find(k => k.kind === 'skills');
     assert.ok(skillsKind, 'should have a skills kind');
 
@@ -636,7 +668,7 @@ describe('stage — skills kind (kimi global)', () => {
   });
 
   test('tracks Kimi agent staging dir before writing artifacts', () => {
-    const layout = resolveRuntimeArtifactLayout('kimi', FAKE_STAGE_DIR, 'global');
+    const layout = resolveRuntimeArtifactLayoutForInstall('kimi', FAKE_STAGE_DIR, 'global');
     const agentsKind = layout.kinds.find(k => k.kind === 'kimi-agents');
     assert.ok(agentsKind, 'should have a kimi-agents kind');
 
@@ -674,7 +706,7 @@ describe('stage — skills kind (kimi global)', () => {
 
 describe('stage — opencode commands kind', () => {
   test('opencode stage returns directory with .md files for selected skills', () => {
-    const layout = resolveRuntimeArtifactLayout('opencode', FAKE_STAGE_DIR);
+    const layout = resolveRuntimeArtifactLayoutForInstall('opencode', FAKE_STAGE_DIR);
     const commandsKind = layout.kinds.find(k => k.kind === 'commands');
     assert.ok(commandsKind, 'should have a commands kind');
 
@@ -691,7 +723,7 @@ describe('stage — opencode commands kind', () => {
 describe('stage — opencode/kilo skills kind (#784)', () => {
   for (const runtime of ['opencode', 'kilo']) {
     test(`${runtime} skills stage writes gsd-<stem>/SKILL.md with name + description`, () => {
-      const layout = resolveRuntimeArtifactLayout(runtime, FAKE_STAGE_DIR);
+      const layout = resolveRuntimeArtifactLayoutForInstall(runtime, FAKE_STAGE_DIR);
       const skillsKind = layout.kinds.find(k => k.kind === 'skills');
       assert.ok(skillsKind, 'should have a skills kind');
 
@@ -717,7 +749,7 @@ describe('stage — opencode/kilo skills kind (#784)', () => {
 
 describe('stage — cursor retired commands kind (#2644)', () => {
   test('cursor layout exposes no commands staging surface', () => {
-    const layout = resolveRuntimeArtifactLayout('cursor', FAKE_STAGE_DIR);
+    const layout = resolveRuntimeArtifactLayoutForInstall('cursor', FAKE_STAGE_DIR);
     const commandsKind = layout.kinds.find(k => k.kind === 'commands');
     assert.equal(commandsKind, undefined);
   });
@@ -921,9 +953,10 @@ describe('#1477 .gsd-source marker provisioning', () => {
   });
 
   // ── Failure 1 end-to-end: resolution succeeds FROM the deployed tree ─────────
-  // The deployed module's __dirname is <claudeDir>/gsd-core/bin/lib, which has no
-  // commands/gsd ancestor (global skills layout). Only the marker rescues it.
-  test('deployed global layout resolves the source root via the marker', () => {
+  // Fixed installs own a raw corpus below the deployed gsd-core tree. The
+  // marker remains compatible, but offline resolution no longer depends on
+  // the executing package path surviving.
+  test('deployed global layout resolves its installation-owned source corpus', () => {
     const claudeDir = path.join(tmpRoot, '.claude');
     fs.mkdirSync(claudeDir, { recursive: true });
     runInstall(true /* isGlobal */, 'claude');
@@ -939,21 +972,16 @@ describe('#1477 .gsd-source marker provisioning', () => {
     delete require.cache[deployedLayoutPath];
     const deployed = require(deployedLayoutPath);
 
-    // Negative proof that the bug condition exists: WITHOUT consulting the marker
-    // (no configDir argument), walk-up from the deployed tree has nothing to find.
-    assert.throws(
-      () => deployed.findInstallSourceRoot(),
-      /could not locate commands\/gsd/,
-      'deployed walk-up must fail without the marker — this is the regression condition',
-    );
+    const installedCorpus = path.join(claudeDir, 'gsd-core', 'commands', 'gsd');
+    assert.ok(fs.existsSync(installedCorpus), 'fixed install must own commands/gsd below gsd-core');
+    assert.equal(fs.realpathSync(deployed.findInstallSourceRoot()), fs.realpathSync(installedCorpus));
 
     // With the marker (configDir provided), list/status resolution succeeds.
     let resolved;
     assert.doesNotThrow(() => {
       resolved = deployed.findInstallSourceRoot(claudeDir);
     }, 'findInstallSourceRoot must resolve via the .gsd-source marker');
-    assert.equal(path.basename(resolved), 'gsd');
-    assert.ok(fs.existsSync(resolved));
+    assert.equal(fs.realpathSync(resolved), fs.realpathSync(installedCorpus));
   });
 
   // ── Adversarial marker-reader cases (no full install needed) ─────────────────
@@ -965,6 +993,7 @@ describe('#1477 .gsd-source marker provisioning', () => {
     test('marker pointing at a valid commands/gsd takes precedence over walk-up', () => {
       const fakeSrc = path.join(cfgDir, 'pkg', 'commands', 'gsd');
       fs.mkdirSync(fakeSrc, { recursive: true });
+      fs.writeFileSync(path.join(fakeSrc, 'gsd-test.md'), '# marker source\n');
       fs.writeFileSync(path.join(cfgDir, '.gsd-source'), fakeSrc + '\n', 'utf8');
 
       const resolved = findInstallSourceRoot(cfgDir);
@@ -985,6 +1014,183 @@ describe('#1477 .gsd-source marker provisioning', () => {
       fs.writeFileSync(path.join(cfgDir, '.gsd-source'), '   \n', 'utf8');
       const resolved = findInstallSourceRoot(cfgDir);
       assert.equal(path.resolve(resolved), path.resolve(REPO_ROOT, 'commands', 'gsd'));
+    });
+
+    test('one complete installed provider wins over a different complete marker provider', (t) => {
+      const installedCommands = path.join(cfgDir, 'gsd-core', 'commands', 'gsd');
+      const installedAgents = path.join(cfgDir, 'gsd-core', 'agents');
+      fs.mkdirSync(installedCommands, { recursive: true });
+      fs.mkdirSync(installedAgents, { recursive: true });
+      const installedCommandPath = path.join(installedCommands, 'help.md');
+      const installedAgentPath = path.join(installedAgents, 'gsd-planner.md');
+      fs.writeFileSync(installedCommandPath, '# installed command\n');
+      fs.writeFileSync(installedAgentPath, '# installed agent\n');
+      fs.writeFileSync(path.join(cfgDir, 'gsd-file-manifest.json'), JSON.stringify({ files: {
+        'gsd-core/commands/gsd/help.md': crypto.createHash('sha256').update(fs.readFileSync(installedCommandPath)).digest('hex'),
+        'gsd-core/agents/gsd-planner.md': crypto.createHash('sha256').update(fs.readFileSync(installedAgentPath)).digest('hex'),
+      } }));
+
+      const markerCommands = path.join(cfgDir, 'legacy-package', 'commands', 'gsd');
+      const markerAgents = path.join(cfgDir, 'legacy-package', 'agents');
+      fs.mkdirSync(markerCommands, { recursive: true });
+      fs.mkdirSync(markerAgents, { recursive: true });
+      fs.writeFileSync(path.join(markerCommands, 'help.md'), '# marker command\n');
+      fs.writeFileSync(path.join(markerAgents, 'gsd-planner.md'), '# marker agent\n');
+      fs.writeFileSync(path.join(cfgDir, '.gsd-source'), markerCommands + '\n');
+
+      const layout = resolveRuntimeArtifactLayout('claude', cfgDir, 'global');
+      const stagedSkills = layout.kinds.find((kind) => kind.kind === 'skills').stage(PROFILE_CORE);
+      const stagedAgents = layout.kinds.find((kind) => kind.kind === 'agents').stage(PROFILE_CORE);
+      t.after(() => cleanup(stagedSkills));
+      t.after(() => cleanup(stagedAgents));
+      assert.match(fs.readFileSync(path.join(stagedSkills, 'gsd-help', 'SKILL.md'), 'utf8'), /installed command/);
+      assert.match(fs.readFileSync(path.join(stagedAgents, 'gsd-planner.md'), 'utf8'), /installed agent/);
+    });
+
+    test('a partial installed corpus is not mixed with a complete marker provider', (t) => {
+      const installedCommands = path.join(cfgDir, 'gsd-core', 'commands', 'gsd');
+      fs.mkdirSync(installedCommands, { recursive: true });
+      fs.writeFileSync(path.join(installedCommands, 'help.md'), '# installed command\n');
+      const markerCommands = path.join(cfgDir, 'legacy-package', 'commands', 'gsd');
+      const markerAgents = path.join(cfgDir, 'legacy-package', 'agents');
+      fs.mkdirSync(markerCommands, { recursive: true });
+      fs.mkdirSync(markerAgents, { recursive: true });
+      fs.writeFileSync(path.join(markerCommands, 'help.md'), '# marker command\n');
+      fs.writeFileSync(path.join(markerAgents, 'gsd-planner.md'), '# marker agent\n');
+      fs.writeFileSync(path.join(cfgDir, '.gsd-source'), markerCommands + '\n');
+
+      const layout = resolveRuntimeArtifactLayout('claude', cfgDir, 'global');
+      const stagedSkills = layout.kinds.find((kind) => kind.kind === 'skills').stage(PROFILE_CORE);
+      const stagedAgents = layout.kinds.find((kind) => kind.kind === 'agents').stage(PROFILE_CORE);
+      t.after(() => cleanup(stagedSkills));
+      t.after(() => cleanup(stagedAgents));
+      assert.match(fs.readFileSync(path.join(stagedSkills, 'gsd-help', 'SKILL.md'), 'utf8'), /marker command/);
+      assert.match(fs.readFileSync(path.join(stagedAgents, 'gsd-planner.md'), 'utf8'), /marker agent/);
+    });
+
+    test('partial providers are not mixed when package fallback is disabled', () => {
+      const installedCommands = path.join(cfgDir, 'gsd-core', 'commands', 'gsd');
+      fs.mkdirSync(installedCommands, { recursive: true });
+      fs.writeFileSync(path.join(installedCommands, 'gsd-test.md'), '# installed command\n');
+
+      const markerCommands = path.join(cfgDir, 'legacy-package', 'commands', 'gsd');
+      fs.mkdirSync(markerCommands, { recursive: true });
+      fs.writeFileSync(path.join(markerCommands, 'gsd-test.md'), '# marker command\n');
+      fs.writeFileSync(path.join(cfgDir, '.gsd-source'), markerCommands + '\n');
+
+      const layout = resolveRuntimeArtifactLayout('claude', cfgDir, 'global');
+      assert.throws(() => layout.kinds.find((kind) => kind.kind === 'skills').stage(PROFILE_CORE), /install or upgrade gsd-core/);
+    });
+
+    test('ordinary Runtime Surface staging never falls back to the source checkout package', () => {
+      const layout = resolveRuntimeArtifactLayout('claude', cfgDir, 'global');
+      const skills = layout.kinds.find((kind) => kind.kind === 'skills');
+      assert.ok(skills);
+      assert.throws(
+        () => skills.stage(PROFILE_CORE),
+        /install or upgrade gsd-core/,
+      );
+    });
+
+    test('an installed corpus without a manifest is not a working fallback', () => {
+      const installedCommands = path.join(cfgDir, 'gsd-core', 'commands', 'gsd');
+      const installedAgents = path.join(cfgDir, 'gsd-core', 'agents');
+      fs.mkdirSync(installedCommands, { recursive: true });
+      fs.mkdirSync(installedAgents, { recursive: true });
+      fs.writeFileSync(path.join(installedCommands, 'help.md'), '# unverified command\n');
+      fs.writeFileSync(path.join(installedAgents, 'gsd-planner.md'), '# unverified agent\n');
+
+      const layout = resolveRuntimeArtifactLayout('claude', cfgDir, 'global');
+      assert.throws(
+        () => layout.kinds.find((kind) => kind.kind === 'skills').stage(PROFILE_CORE),
+        /install or upgrade gsd-core/,
+      );
+    });
+
+    test('an installed corpus whose bytes do not match its manifest is not a working fallback', () => {
+      const installedCommands = path.join(cfgDir, 'gsd-core', 'commands', 'gsd');
+      const installedAgents = path.join(cfgDir, 'gsd-core', 'agents');
+      fs.mkdirSync(installedCommands, { recursive: true });
+      fs.mkdirSync(installedAgents, { recursive: true });
+      fs.writeFileSync(path.join(installedCommands, 'help.md'), '# corrupted command\n');
+      fs.writeFileSync(path.join(installedAgents, 'gsd-planner.md'), '# corrupted agent\n');
+      fs.writeFileSync(path.join(cfgDir, 'gsd-file-manifest.json'), JSON.stringify({ files: {
+        'gsd-core/commands/gsd/help.md': '0'.repeat(64),
+        'gsd-core/agents/gsd-planner.md': '0'.repeat(64),
+      } }));
+
+      const layout = resolveRuntimeArtifactLayout('claude', cfgDir, 'global');
+      assert.throws(
+        () => layout.kinds.find((kind) => kind.kind === 'skills').stage(PROFILE_CORE),
+        /install or upgrade gsd-core/,
+      );
+    });
+
+    test('a hash-mismatched installed corpus falls back to an independent complete marker provider', (t) => {
+      const installedCommands = path.join(cfgDir, 'gsd-core', 'commands', 'gsd');
+      const installedAgents = path.join(cfgDir, 'gsd-core', 'agents');
+      fs.mkdirSync(installedCommands, { recursive: true });
+      fs.mkdirSync(installedAgents, { recursive: true });
+      fs.writeFileSync(path.join(installedCommands, 'help.md'), '# corrupted command\n');
+      fs.writeFileSync(path.join(installedAgents, 'gsd-planner.md'), '# corrupted agent\n');
+      fs.writeFileSync(path.join(cfgDir, 'gsd-file-manifest.json'), JSON.stringify({ files: {
+        'gsd-core/commands/gsd/help.md': '0'.repeat(64),
+        'gsd-core/agents/gsd-planner.md': '0'.repeat(64),
+      } }));
+
+      const markerCommands = path.join(cfgDir, 'legacy-package', 'commands', 'gsd');
+      const markerAgents = path.join(cfgDir, 'legacy-package', 'agents');
+      fs.mkdirSync(markerCommands, { recursive: true });
+      fs.mkdirSync(markerAgents, { recursive: true });
+      fs.writeFileSync(path.join(markerCommands, 'help.md'), '# marker command\n');
+      fs.writeFileSync(path.join(markerAgents, 'gsd-planner.md'), '# marker agent\n');
+      fs.writeFileSync(path.join(cfgDir, '.gsd-source'), markerCommands + '\n');
+
+      const layout = resolveRuntimeArtifactLayout('claude', cfgDir, 'global');
+      const stagedSkills = layout.kinds.find((kind) => kind.kind === 'skills').stage(PROFILE_CORE);
+      const stagedAgents = layout.kinds.find((kind) => kind.kind === 'agents').stage(PROFILE_CORE);
+      t.after(() => cleanup(stagedSkills));
+      t.after(() => cleanup(stagedAgents));
+      assert.match(fs.readFileSync(path.join(stagedSkills, 'gsd-help', 'SKILL.md'), 'utf8'), /marker command/);
+      assert.match(fs.readFileSync(path.join(stagedAgents, 'gsd-planner.md'), 'utf8'), /marker agent/);
+    });
+
+    test('manifest-expected missing corpus file fails closed without reusing its marker alias', () => {
+      const installedCommands = path.join(cfgDir, 'gsd-core', 'commands', 'gsd');
+      const installedAgents = path.join(cfgDir, 'gsd-core', 'agents');
+      fs.mkdirSync(installedCommands, { recursive: true });
+      fs.mkdirSync(installedAgents, { recursive: true });
+      fs.writeFileSync(path.join(installedCommands, 'gsd-test.md'), '# installed command\n');
+      fs.writeFileSync(path.join(installedAgents, 'gsd-test-agent.md'), '# installed agent\n');
+      fs.writeFileSync(path.join(cfgDir, 'gsd-file-manifest.json'), JSON.stringify({ files: {
+        'gsd-core/commands/gsd/gsd-test.md': '0'.repeat(64),
+        'gsd-core/agents/gsd-test-agent.md': '0'.repeat(64),
+        'gsd-core/agents/removed.md': '0'.repeat(64),
+      } }));
+      fs.writeFileSync(path.join(cfgDir, '.gsd-source'), installedCommands + '\n');
+
+      const layout = resolveRuntimeArtifactLayout('claude', cfgDir, 'global');
+      assert.throws(() => layout.kinds.find((kind) => kind.kind === 'skills').stage(PROFILE_CORE), /install or upgrade gsd-core/);
+    });
+
+    test('a symlink inside the installed corpus is not a confined source', (t) => {
+      const installedCommands = path.join(cfgDir, 'gsd-core', 'commands', 'gsd');
+      const installedAgents = path.join(cfgDir, 'gsd-core', 'agents');
+      fs.mkdirSync(installedCommands, { recursive: true });
+      fs.mkdirSync(installedAgents, { recursive: true });
+      fs.writeFileSync(path.join(installedCommands, 'gsd-test.md'), '# installed command\n');
+      const outside = path.join(cfgDir, 'outside.md');
+      fs.writeFileSync(outside, '# outside\n');
+      try {
+        fs.symlinkSync(outside, path.join(installedAgents, 'gsd-test-agent.md'));
+      } catch (error) {
+        t.skip(`symlink creation unavailable: ${error.code || error.message}`);
+        return;
+      }
+
+      const layout = resolveRuntimeArtifactLayout('claude', cfgDir, 'global');
+      assert.throws(() => layout.kinds.find((kind) => kind.kind === 'skills').stage(PROFILE_CORE), /install or upgrade gsd-core/);
+      assert.strictEqual(fs.readFileSync(outside, 'utf8'), '# outside\n');
     });
   });
 });
@@ -1054,8 +1260,7 @@ describe('#2624 .gsd-source marker is rewritten before staging reads it', () => 
     cleanup(tmpRoot);
   });
 
-  // The current package's commands/gsd — what the marker MUST point at after install.
-  const CURRENT_SOURCE = path.join(REPO_ROOT, 'commands', 'gsd');
+  const installedSource = (claudeDir) => path.join(claudeDir, 'gsd-core', 'commands', 'gsd');
 
   test('claude-global install overwrites a stale .gsd-source marker before staging reads it', (t) => {
     const claudeDir = path.join(tmpRoot, '.claude');
@@ -1090,8 +1295,8 @@ describe('#2624 .gsd-source marker is rewritten before staging reads it', () => 
     const markerPath = path.join(claudeDir, '.gsd-source');
     assert.ok(fs.existsSync(markerPath), 'marker must exist after install');
     const finalMarker = path.resolve(fs.readFileSync(markerPath, 'utf8').trim());
-    assert.equal(finalMarker, path.resolve(CURRENT_SOURCE),
-      `final marker must point at the current package source, not ${finalMarker}`);
+    assert.equal(finalMarker, path.resolve(installedSource(claudeDir)),
+      `final marker must point at the installed current-version corpus, not ${finalMarker}`);
 
     // The decisive assertion: staging must NEVER have resolved the stale source. Before the
     // fix, at least one staging resolution returned the stale path (read before rewrite).
@@ -1112,8 +1317,8 @@ describe('#2624 .gsd-source marker is rewritten before staging reads it', () => 
     const resolved = fs.readFileSync(markerPath, 'utf8').trim();
     assert.equal(
       path.resolve(resolved),
-      path.resolve(CURRENT_SOURCE),
-      'fresh install marker must point at the current package source',
+      path.resolve(installedSource(claudeDir)),
+      'fresh install marker must point at the installed corpus',
     );
   });
 
@@ -1132,8 +1337,8 @@ describe('#2624 .gsd-source marker is rewritten before staging reads it', () => 
     const resolved = fs.readFileSync(markerPath, 'utf8').trim();
     assert.equal(
       path.resolve(resolved),
-      path.resolve(CURRENT_SOURCE),
-      'ghost marker must be rewritten to the current package source',
+      path.resolve(installedSource(claudeDir)),
+      'ghost marker must be rewritten to the installed corpus',
     );
   });
 });
