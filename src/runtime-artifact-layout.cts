@@ -24,6 +24,10 @@ import os from 'node:os';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import installFsAdapter = require('./install-fs-adapter.cjs');
 const { installFs, mkInstallTempDir } = installFsAdapter;
+// Reuse the install manifest's existing parser and streamed SHA-256
+// classification instead of deriving a second integrity implementation here.
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+import installerMigrations = require('./installer-migrations.cjs');
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import installProfiles = require('./install-profiles.cjs');
 const {
@@ -126,6 +130,31 @@ interface ArtifactKind {
   converter?: string;
 }
 
+type RuntimeSurfaceSourceClass = 'commands' | 'agents';
+
+interface RuntimeSurfaceSourceProvider {
+  kind: 'installed' | 'marker' | 'package';
+  commandsRoot: string;
+  agentsRoot: string;
+}
+
+interface SourceResolutionContext {
+  runtimeConfigDir: string;
+  scope: 'local' | 'global';
+  required: Set<RuntimeSurfaceSourceClass>;
+  authority: 'installer' | 'runtime' | 'compatible';
+  provider?: RuntimeSurfaceSourceProvider;
+}
+
+function requiredRuntimeSurfaceSourceClasses(kinds: Iterable<{ kind?: string }>): Set<RuntimeSurfaceSourceClass> {
+  const required = new Set<RuntimeSurfaceSourceClass>();
+  for (const kind of kinds) {
+    if (kind.kind === 'commands' || kind.kind === 'skills') required.add('commands');
+    if (kind.kind === 'agents' || kind.kind === 'kimi-agents') required.add('agents');
+  }
+  return required;
+}
+
 interface Layout {
   runtime: string;
   configDir: string;
@@ -137,124 +166,215 @@ interface Layout {
 // Source root finders
 // ---------------------------------------------------------------------------
 
-/**
- * Locate the GSD commands/gsd source directory.
- *
- * Resolution order:
- * 1. If runtimeConfigDir provided, check <runtimeConfigDir>/.gsd-source marker.
- * 2. Walk up from __dirname using path.dirname (no literal .. segments).
- * 3. Throw a descriptive error if neither succeeds.
- */
-function findInstallSourceRoot(runtimeConfigDir?: string): string {
-  // Step 1: marker check — reads `<runtimeConfigDir>/.gsd-source`, a path
-  // under the INSTALL DESTINATION, so this probe goes through the injected
-  // adapter (installFs()).
-  if (runtimeConfigDir) {
-    const markerPath = path.join(runtimeConfigDir, '.gsd-source');
-    if (installFs().existsSync(markerPath)) {
-      try {
-        const src = installFs().readFileSync(markerPath, 'utf8').trim();
-        if (src && installFs().existsSync(src)) return src;
-      } catch { /* fall through */ }
+function isReadableDirectory(candidate: string, routed: boolean): boolean {
+  try {
+    const io = routed ? installFs() : fs;
+    const stat = io.lstatSync(candidate);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) return false;
+    const entries: string[] = io.readdirSync(candidate);
+    let readableFiles = 0;
+    for (const name of entries) {
+      const child = path.join(candidate, name);
+      const childStat = io.lstatSync(child);
+      if (childStat.isSymbolicLink()) return false;
+      if (childStat.isDirectory()) {
+        if (!isReadableDirectory(child, routed)) return false;
+        readableFiles += 1;
+      } else if (childStat.isFile()) {
+        if (routed) io.readFileSync(child);
+        else fs.accessSync(child, fs.constants.R_OK);
+        readableFiles += 1;
+      } else {
+        return false;
+      }
     }
+    return readableFiles > 0;
+  } catch {
+    return false;
   }
+}
 
-  // Step 2: walk up from __dirname to locate the GSD PACKAGE'S OWN source
-  // tree (commands/gsd/) — this resolves where the installer's own code is
-  // running FROM, not anything under the install destination, so it is
-  // deliberately NOT routed through the injected fs adapter (#2874): a fake
-  // "destination" adapter has no reason to know about the real package's own
-  // on-disk layout (an injected adapter's store starts empty and is never
-  // seeded with real repo paths), and routing it through would make this
-  // resolution unconditionally throw rather than gracefully staging nothing.
-  //
-  // Uses `fs.statSync` in a try/catch rather than `fs.existsSync` — this is
-  // LOAD-BEARING, not a style choice: tests/executed-plan.test.cjs's F2 cases
-  // poison every method on the ROUTED fs surface (including `existsSync`,
-  // since installFs()'s REAL_ADAPTER also calls it) to prove nothing on the
-  // installRuntimeArtifacts call tree reaches real fs. The F2 "nativePlugin
-  // runtime: pi" test calls this function (via findInstallSourceRoot()) AFTER
-  // installing that poison, specifically to resolve the pi nativePlugin
-  // source path against this repo's own real layout — an operation this
-  // function must still be able to perform even while `existsSync` is
-  // poisoned, because this Step 2 walk is real-fs-only by design and was
-  // never meant to be covered by that poison list. `statSync` is not on the
-  // poisoned surface, so this probe survives; switching back to `existsSync`
-  // makes that F2 test throw (verified: reverting this to `existsSync` trips
-  // the poison and breaks the pi nativePlugin case).
+function installedManifestIsComplete(
+  runtimeConfigDir: string,
+  required: ReadonlySet<RuntimeSurfaceSourceClass>,
+): boolean {
+  const io = installFs();
+  const manifestPath = path.join(runtimeConfigDir, 'gsd-file-manifest.json');
+  if (!io.existsSync(manifestPath)) return false;
+
+  try {
+    const manifest = installerMigrations.readInstallManifest(runtimeConfigDir);
+    if (manifest.manifestVersion === null) return false;
+    const keys = Object.keys(manifest.files);
+    const prefixes: string[] = [];
+    if (required.has('commands')) prefixes.push('gsd-core/commands/gsd/');
+    if (required.has('agents')) prefixes.push('gsd-core/agents/');
+
+    for (const prefix of prefixes) {
+      const expected = keys.filter((key) => key.startsWith(prefix));
+      if (expected.length === 0) return false;
+      for (const key of expected) {
+        const parts = key.split('/');
+        if (parts.some((part) => part === '' || part === '.' || part === '..')) return false;
+        const candidate = path.resolve(runtimeConfigDir, ...parts);
+        const root = path.resolve(runtimeConfigDir);
+        if (!candidate.startsWith(root + path.sep)) return false;
+        const stat = io.lstatSync(candidate);
+        if (!stat.isFile() || stat.isSymbolicLink()) return false;
+        if (installerMigrations.classifyArtifact(runtimeConfigDir, key, manifest).classification !== 'managed-pristine') {
+          return false;
+        }
+      }
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function providerHasRequiredClasses(
+  provider: RuntimeSurfaceSourceProvider,
+  required: ReadonlySet<RuntimeSurfaceSourceClass>,
+  routed: boolean,
+  runtimeConfigDir?: string,
+): boolean {
+  const readable = (!required.has('commands') || isReadableDirectory(provider.commandsRoot, routed)) &&
+    (!required.has('agents') || isReadableDirectory(provider.agentsRoot, routed));
+  if (!readable) return false;
+  return provider.kind !== 'installed' || !runtimeConfigDir || installedManifestIsComplete(runtimeConfigDir, required);
+}
+
+function providersShareRequiredRoots(
+  left: RuntimeSurfaceSourceProvider,
+  right: RuntimeSurfaceSourceProvider,
+  required: ReadonlySet<RuntimeSurfaceSourceClass>,
+): boolean {
+  return (!required.has('commands') || path.resolve(left.commandsRoot) === path.resolve(right.commandsRoot)) &&
+    (!required.has('agents') || path.resolve(left.agentsRoot) === path.resolve(right.agentsRoot));
+}
+
+function markerProvider(runtimeConfigDir: string): RuntimeSurfaceSourceProvider | null {
+  const markerPath = path.join(runtimeConfigDir, '.gsd-source');
+  try {
+    if (!installFs().existsSync(markerPath)) return null;
+    const commandsRoot = installFs().readFileSync(markerPath, 'utf8').trim();
+    if (!commandsRoot) return null;
+    return {
+      kind: 'marker',
+      commandsRoot,
+      agentsRoot: path.resolve(path.dirname(commandsRoot), '..', 'agents'),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function packageProvider(required: ReadonlySet<RuntimeSurfaceSourceClass>): RuntimeSurfaceSourceProvider | null {
+  // Package-source IO deliberately stays on real fs; injected install adapters
+  // model destinations, not the executing package tree (#2874).
   let dir = __dirname;
   for (let i = 0; i < 6; i++) {
-    const candidate = path.join(dir, 'commands', 'gsd');
-    try {
-      fs.statSync(candidate);
-      return candidate;
-    } catch { /* not here — keep walking up */ }
+    const candidate: RuntimeSurfaceSourceProvider = {
+      kind: 'package',
+      commandsRoot: path.join(dir, 'commands', 'gsd'),
+      agentsRoot: path.join(dir, 'agents'),
+    };
+    if (providerHasRequiredClasses(candidate, required, false)) return candidate;
     const parent = path.dirname(dir);
     if (parent === dir) break;
     dir = parent;
   }
-
-  throw new Error(`findInstallSourceRoot: could not locate commands/gsd from ${__dirname}`);
+  return null;
 }
 
 /**
- * Locate the GSD agents source directory.
- *
- * Resolution order:
- * 1. If runtimeConfigDir provided, check <runtimeConfigDir>/.gsd-source marker.
- * 2. Walk up from __dirname using path.dirname (no literal .. segments).
- * 3. Throw a descriptive error if neither succeeds.
+ * Select one complete source provider for an entire resolved layout.
+ * Provider mixing is forbidden: a skills+agents layout cannot take commands
+ * from one package version and agents from another.
  */
-function findAgentsSourceRoot(runtimeConfigDir?: string): string {
-  // Step 1: marker check (destination-relative — routed through installFs()).
-  if (runtimeConfigDir) {
-    const markerPath = path.join(runtimeConfigDir, '.gsd-source');
-    if (installFs().existsSync(markerPath)) {
-      try {
-        const src = installFs().readFileSync(markerPath, 'utf8').trim();
-        if (src && installFs().existsSync(src)) {
-          // Marker points to commands/gsd; agents/ is a sibling of commands/
-          const agentsCandidate = path.resolve(path.dirname(src), '..', 'agents');
-          if (installFs().existsSync(agentsCandidate)) return agentsCandidate;
-        }
-      } catch { /* fall through */ }
+function resolveSourceProvider(
+  runtimeConfigDir: string | undefined,
+  requiredClasses: Iterable<RuntimeSurfaceSourceClass>,
+  scope: 'local' | 'global' = 'global',
+  authority: 'installer' | 'runtime' | 'compatible' = 'compatible',
+): RuntimeSurfaceSourceProvider {
+  const required = new Set(requiredClasses);
+  if (required.size === 0) {
+    return { kind: 'package', commandsRoot: '', agentsRoot: '' };
+  }
+
+  if (authority === 'installer') {
+    if (runtimeConfigDir) {
+      const marker = markerProvider(runtimeConfigDir);
+      if (marker && providerHasRequiredClasses(marker, required, true)) return marker;
     }
+    const packaged = packageProvider(required);
+    if (packaged) return packaged;
+    throw new Error(
+      `Executing package source is unavailable or incomplete for ${[...required].sort().join('+')}.`,
+    );
   }
 
-  // Step 2: walk up from __dirname — locates THIS package's own agents/
-  // source tree, not the install destination. See findInstallSourceRoot's
-  // Step 2 comment (#2874) for why this stays unrouted, real-fs-only, and why
-  // it uses `statSync` rather than `existsSync` (load-bearing against F2's
-  // poison of the routed fs surface, not a style choice).
-  let dir = __dirname;
-  for (let i = 0; i < 6; i++) {
-    const candidate = path.join(dir, 'agents');
-    try {
-      fs.statSync(candidate);
-      return candidate;
-    } catch { /* not here — keep walking up */ }
-    const parent = path.dirname(dir);
-    if (parent === dir) break;
-    dir = parent;
+  if (runtimeConfigDir && scope === 'global') {
+    const installed: RuntimeSurfaceSourceProvider = {
+      kind: 'installed',
+      commandsRoot: path.join(runtimeConfigDir, 'gsd-core', 'commands', 'gsd'),
+      agentsRoot: path.join(runtimeConfigDir, 'gsd-core', 'agents'),
+    };
+    if (providerHasRequiredClasses(installed, required, true, runtimeConfigDir)) return installed;
+
+    const marker = markerProvider(runtimeConfigDir);
+    if (marker && !providersShareRequiredRoots(marker, installed, required) && providerHasRequiredClasses(marker, required, true)) {
+      return marker;
+    }
+  } else if (runtimeConfigDir) {
+    const marker = markerProvider(runtimeConfigDir);
+    if (marker && providerHasRequiredClasses(marker, required, true)) return marker;
   }
 
-  throw new Error(`findAgentsSourceRoot: could not locate agents/ from ${__dirname}`);
+  if (authority === 'compatible') {
+    const packaged = packageProvider(required);
+    if (packaged) return packaged;
+  }
+
+  throw new Error(
+    `Runtime Surface source is unavailable or incomplete for ${[...required].sort().join('+')}; ` +
+    'install or upgrade gsd-core before materializing this surface.',
+  );
+}
+
+function sourceRootFor(context: SourceResolutionContext, sourceClass: RuntimeSurfaceSourceClass): string {
+  context.provider ??= resolveSourceProvider(
+    context.runtimeConfigDir,
+    context.required,
+    context.scope,
+    context.authority,
+  );
+  return sourceClass === 'commands' ? context.provider.commandsRoot : context.provider.agentsRoot;
+}
+
+function findInstallSourceRoot(runtimeConfigDir?: string): string {
+  return resolveSourceProvider(runtimeConfigDir, ['commands']).commandsRoot;
+}
+
+function findAgentsSourceRoot(runtimeConfigDir?: string): string {
+  return resolveSourceProvider(runtimeConfigDir, ['agents']).agentsRoot;
 }
 
 // ---------------------------------------------------------------------------
 // Layout table builders
 // ---------------------------------------------------------------------------
 
-function commandsKind(destSubpath: string, prefix: string, configDir: string): ArtifactKind {
+function commandsKind(destSubpath: string, prefix: string, sourceContext: SourceResolutionContext): ArtifactKind {
   return {
     kind: 'commands',
     destSubpath,
     prefix,
-    stage: (resolved) => stageSkillsForProfile(findInstallSourceRoot(configDir), resolved),
+    stage: (resolved) => stageSkillsForProfile(sourceRootFor(sourceContext, 'commands'), resolved),
   };
 }
 
-function agentsKind(destSubpath: string, prefix: string, configDir: string): ArtifactKind {
+function agentsKind(destSubpath: string, prefix: string, configDir: string, sourceContext: SourceResolutionContext): ArtifactKind {
   return {
     kind: 'agents',
     destSubpath,
@@ -278,7 +398,7 @@ function agentsKind(destSubpath: string, prefix: string, configDir: string): Art
     // a caller with NO agentCtx in scope is unaffected (row I2: converter-only,
     // as today), matching stageAgentsForRuntimeWithConverter's own contract.
     stage: (resolved, agentCtx) => stageAgentsForRuntimeWithConverter(
-      findAgentsSourceRoot(configDir),
+      sourceRootFor(sourceContext, 'agents'),
       resolved,
       (content: string) => content,
       false,
@@ -423,7 +543,8 @@ function convertedAgentsKind(
   prefix: string,
   converterName: string,
   configDir: string,
-  scope: 'local' | 'global' = 'global',
+  sourceContext: SourceResolutionContext,
+  scope: 'local' | 'global',
 ): ArtifactKind {
   return {
     kind: 'agents',
@@ -499,7 +620,7 @@ function convertedAgentsKind(
       // for descriptor-driven runtimes), thread it through so stageAgentsForRuntimeWithConverter
       // can apply the full pre-converter + post-converter sequence in the correct order.
       return stageAgentsForRuntimeWithConverter(
-        findAgentsSourceRoot(configDir),
+        sourceRootFor(sourceContext, 'agents'),
         resolved,
         converter,
         isGlobalScope(scope),
@@ -509,7 +630,7 @@ function convertedAgentsKind(
   };
 }
 
-function kimiAgentsKind(destSubpath: string, prefix: string, configDir: string): ArtifactKind {
+function kimiAgentsKind(destSubpath: string, prefix: string, configDir: string, sourceContext: SourceResolutionContext): ArtifactKind {
   return {
     kind: 'kimi-agents',
     destSubpath,
@@ -525,7 +646,7 @@ function kimiAgentsKind(destSubpath: string, prefix: string, configDir: string):
       // #2995: compose at staging (identity converter) so the readFileSync below
       // sees marker-free content — same single composing stager as agentsKind.
       const stagedAgents = stageAgentsForRuntimeWithConverter(
-        findAgentsSourceRoot(configDir),
+        sourceRootFor(sourceContext, 'agents'),
         resolved,
         (content: string) => content,
       );
@@ -582,8 +703,9 @@ function skillsKind(
   converterName: string,
   runtime: string,
   configDir: string,
-  nested = false,
-  scope: 'local' | 'global' = 'global',
+  nested: boolean,
+  scope: 'local' | 'global',
+  sourceContext: SourceResolutionContext,
   capabilityRegistry?: CapabilityRegistryForSkills,
 ): ArtifactKind {
   return {
@@ -619,7 +741,7 @@ function skillsKind(
       // rewritten shape.
       const wrappedConverter = (content: string, skillName: string): string =>
         realConverter(content, skillName, runtime, cmdNames, isGlobal);
-      return stageSkillsForRuntimeAsSkills(findInstallSourceRoot(configDir), resolved, wrappedConverter, prefix, nested, capabilityRegistry);
+      return stageSkillsForRuntimeAsSkills(sourceRootFor(sourceContext, 'commands'), resolved, wrappedConverter, prefix, nested, capabilityRegistry);
     },
   };
 }
@@ -644,7 +766,7 @@ function convertedCommandsKind(
   destSubpath: string,
   prefix: string,
   converterName: string,
-  configDir: string,
+  sourceContext: SourceResolutionContext,
 ): ArtifactKind {
   return {
     kind: 'commands',
@@ -652,7 +774,7 @@ function convertedCommandsKind(
     prefix,
     stage: (resolved) => {
       const converter = _resolveNamedConverter(converterName, 'commands') as (content: string, commandName: string) => string;
-      return stageCommandsForRuntimeFlat(findInstallSourceRoot(configDir), resolved, converter, prefix);
+      return stageCommandsForRuntimeFlat(sourceRootFor(sourceContext, 'commands'), resolved, converter, prefix);
     },
   };
 }
@@ -739,7 +861,7 @@ function getRegistry(): RegistryLike {
  * Map a single ArtifactKindDescriptor entry to an ArtifactKind using the
  * matching builder function. Mirrors the hand-built calls in the old switch.
  */
-function dispatchKindEntry(entry: ArtifactKindDescriptor, runtime: string, configDir: string, scope: 'local' | 'global', capabilityRegistry?: CapabilityRegistryForSkills): ArtifactKind {
+function dispatchKindEntry(entry: ArtifactKindDescriptor, runtime: string, configDir: string, scope: 'local' | 'global', capabilityRegistry: CapabilityRegistryForSkills | undefined, sourceContext: SourceResolutionContext): ArtifactKind {
   const { kind, destSubpath, prefix, nesting, converter } = entry;
   const nested = nesting === 'nested';
 
@@ -747,14 +869,14 @@ function dispatchKindEntry(entry: ArtifactKindDescriptor, runtime: string, confi
   switch (kind) {
     case 'commands':
       result = converter == null
-        ? commandsKind(destSubpath, prefix, configDir)
-        : convertedCommandsKind(destSubpath, prefix, converter, configDir);
+        ? commandsKind(destSubpath, prefix, sourceContext)
+        : convertedCommandsKind(destSubpath, prefix, converter, sourceContext);
       break;
 
     case 'agents':
       result = converter == null
-        ? agentsKind(destSubpath, prefix, configDir)
-        : convertedAgentsKind(destSubpath, prefix, converter, configDir, scope);
+        ? agentsKind(destSubpath, prefix, configDir, sourceContext)
+        : convertedAgentsKind(destSubpath, prefix, converter, configDir, sourceContext, scope);
       break;
 
     case 'skills':
@@ -763,11 +885,11 @@ function dispatchKindEntry(entry: ArtifactKindDescriptor, runtime: string, confi
           `resolveRuntimeArtifactLayout: skills entry for '${runtime}' has converter=null (converter is required for skills)`,
         );
       }
-      result = skillsKind(destSubpath, prefix, converter, runtime, configDir, nested, scope, capabilityRegistry);
+      result = skillsKind(destSubpath, prefix, converter, runtime, configDir, nested, scope, sourceContext, capabilityRegistry);
       break;
 
     case 'kimi-agents':
-      result = kimiAgentsKind(destSubpath, prefix, configDir);
+      result = kimiAgentsKind(destSubpath, prefix, configDir, sourceContext);
       break;
 
     default:
@@ -803,7 +925,12 @@ function dispatchKindEntry(entry: ArtifactKindDescriptor, runtime: string, confi
  *   is not threaded in at layout-build time a `full`-profile install stages no
  *   third-party capability skills regardless of registration (#2322 blocker 2).
  */
-function resolveRuntimeArtifactLayout(runtime: string, configDir: string, scope: 'local' | 'global' = 'global', capabilityRegistry?: CapabilityRegistryForSkills): Layout {
+function resolveRuntimeArtifactLayout(
+  runtime: string,
+  configDir: string,
+  scope: 'local' | 'global' = 'global',
+  capabilityRegistry?: CapabilityRegistryForSkills,
+): Layout {
   return resolveRuntimeArtifactLayoutFromRegistry(getRegistry(), runtime, configDir, scope, capabilityRegistry);
 }
 
@@ -813,6 +940,30 @@ function resolveRuntimeArtifactLayoutFromRegistry(
   configDir: string,
   scope: 'local' | 'global' = 'global',
   capabilityRegistry?: CapabilityRegistryForSkills,
+): Layout {
+  return resolveRuntimeArtifactLayoutInternal(registry, runtime, configDir, scope, capabilityRegistry, false);
+}
+
+/** Installer-only variant: eagerly freezes one complete compatibility-marker
+ * or executing-package provider before provisioning mutates the installed
+ * corpus. Keeping this separate preserves resolveRuntimeArtifactLayout's
+ * placement-only, no-I/O resolution contract (ADR-3660). */
+function resolveRuntimeArtifactLayoutForInstall(
+  runtime: string,
+  configDir: string,
+  scope: 'local' | 'global' = 'global',
+  capabilityRegistry?: CapabilityRegistryForSkills,
+): Layout {
+  return resolveRuntimeArtifactLayoutInternal(getRegistry(), runtime, configDir, scope, capabilityRegistry, true);
+}
+
+function resolveRuntimeArtifactLayoutInternal(
+  registry: RegistryLike,
+  runtime: string,
+  configDir: string,
+  scope: 'local' | 'global',
+  capabilityRegistry: CapabilityRegistryForSkills | undefined,
+  freezeInstallerProvider: boolean,
 ): Layout {
   if (typeof configDir !== 'string' || configDir === '') {
     throw new TypeError('configDir must be a non-empty string');
@@ -827,7 +978,29 @@ function resolveRuntimeArtifactLayoutFromRegistry(
   }
 
   const entries: ArtifactKindDescriptor[] = desc[scope] ?? [];
-  const kinds: ArtifactKind[] = entries.map((entry) => dispatchKindEntry(entry, runtime, configDir, scope, capabilityRegistry));
+  const required = requiredRuntimeSurfaceSourceClasses(entries);
+  // Installer layouts freeze one complete provider: a compatibility marker
+  // when explicitly configured, otherwise the executing package. Installers
+  // may provision the durable installed corpus between layout resolution and
+  // stage(), and
+  // that write must not silently change which version this already-resolved
+  // plan reads. This also preserves the legacy .gsd-source contract for
+  // callers that deliberately supplied a complete marker before resolving.
+  // Ordinary global runtime-surface layouts never fall back to the executing
+  // package: they require the installation-owned corpus or a complete
+  // compatibility marker and therefore fail closed for a source-less legacy
+  // install. Local layouts retain their established package/upward source;
+  // local installs intentionally own neither the global corpus nor a marker.
+  const sourceContext: SourceResolutionContext = {
+    runtimeConfigDir: configDir,
+    scope,
+    required,
+    authority: freezeInstallerProvider ? 'installer' : scope === 'local' ? 'compatible' : 'runtime',
+    provider: required.size > 0 && freezeInstallerProvider
+      ? resolveSourceProvider(configDir, required, scope, 'installer')
+      : undefined,
+  };
+  const kinds: ArtifactKind[] = entries.map((entry) => dispatchKindEntry(entry, runtime, configDir, scope, capabilityRegistry, sourceContext));
 
   return { runtime, configDir, scope, kinds };
 }
@@ -1115,4 +1288,4 @@ function resolveTriggerSurface(runtime: string, scopes: InstallScope[], opts: Tr
 }
 
 // getInstallExports removed in ADR-1508 / #1511 Phase 2 (last upward .cts→install.js dep).
-export = { resolveRuntimeArtifactLayout, resolveRuntimeArtifactLayoutFromRegistry, findInstallSourceRoot, resolveTriggerSurface, isNamespacedByDir, composeCommandFilename };
+export = { resolveRuntimeArtifactLayout, resolveRuntimeArtifactLayoutForInstall, resolveRuntimeArtifactLayoutFromRegistry, requiredRuntimeSurfaceSourceClasses, findInstallSourceRoot, findAgentsSourceRoot, resolveTriggerSurface, isNamespacedByDir, composeCommandFilename };

@@ -738,6 +738,7 @@ function createFixture() {
   const configDir = createTempDir('gsd-bug3659-');
   const skillsDir = path.join(configDir, 'skills');
   fs.mkdirSync(skillsDir, { recursive: true });
+  fs.writeFileSync(path.join(configDir, '.gsd-source'), REAL_COMMANDS_DIR + '\n');
 
   const gsdExplore = path.join(skillsDir, 'gsd-explore');
   const gsdHelp = path.join(skillsDir, 'gsd-help');
@@ -953,7 +954,7 @@ describe('bug-3659: applySurface prunes ~/.claude/skills/gsd-*/ on cluster disab
   const { describe: __issueDescribe, test: __issueTest } = require('node:test');
   const surfaceMod = require('../gsd-core/bin/lib/surface.cjs');
   const { writeSurface: __writeSurface, applySurface: __applySurface } = surfaceMod;
-  const { resolveRuntimeArtifactLayout: __resolveRuntimeArtifactLayout } = require('../gsd-core/bin/lib/runtime-artifact-layout.cjs');
+  const { resolveRuntimeArtifactLayoutForInstall: __resolveRuntimeArtifactLayout } = require('../gsd-core/bin/lib/runtime-artifact-layout.cjs');
 
   /** Install a fake already-installed third-party capability skill under a sandboxed GSD_HOME. */
   function __installCapSkill(gsdHome, capId, stem, content) {
@@ -1521,7 +1522,7 @@ const {
   resolveProfile,
 } = require('../gsd-core/bin/lib/install-profiles.cjs');
 const { applySurface } = require('../gsd-core/bin/lib/surface.cjs');
-const { resolveRuntimeArtifactLayout } = require('../gsd-core/bin/lib/runtime-artifact-layout.cjs');
+const { resolveRuntimeArtifactLayoutForInstall: resolveRuntimeArtifactLayout } = require('../gsd-core/bin/lib/runtime-artifact-layout.cjs');
 
 const MANIFEST = loadSkillsManifest(COMMANDS_GSD);
 const RESOLVED_FULL = resolveProfile({ modes: ['full'], manifest: MANIFEST });

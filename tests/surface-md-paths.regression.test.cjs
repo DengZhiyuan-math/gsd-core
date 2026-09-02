@@ -39,3 +39,17 @@ describe('#2116 regression: surface.md resolvable require + correct package', ()
     );
   });
 });
+
+describe('#4132 regression: surface.md uses the state-last public contract', () => {
+  const content = fs.readFileSync(SURFACE_MD, 'utf-8');
+
+  test('mutations pass an in-memory candidate without an eager state write', () => {
+    assert.match(content, /surfaceState/);
+    assert.match(content, /publishes the candidate state only after/);
+    assert.doesNotMatch(content, /writeSurface\(runtimeConfigDir, surfaceState\)/);
+  });
+
+  test('reset is represented as an absent-state candidate, not an eager delete', () => {
+    assert.match(content, /surfaceState: null/);
+  });
+});

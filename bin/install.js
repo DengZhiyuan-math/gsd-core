@@ -791,6 +791,10 @@ const {
   resolveRuntimeArtifactLayout,
 } = require(path.join(_gsdLibDir, 'runtime-artifact-layout.cjs'));
 const {
+  readSurface,
+  resolveSurface,
+} = require(path.join(_gsdLibDir, 'surface.cjs'));
+const {
   assertDestWithinConfigHome,
   createRuntimeArtifactInstallPlan,
   createRuntimeArtifactUninstallPlan,
@@ -819,6 +823,7 @@ const installEngine = require(path.join(_gsdLibDir, 'install-engine.cjs'));
 // surface either — found and retired in the same sweep.
 const {
   installRuntimeArtifacts,
+  provisionRuntimeSurfaceCorpus,
   uninstallRuntimeArtifacts,
   installOpencodeFamilySkills,
   installAgentsKindStandalone,
@@ -10512,7 +10517,7 @@ function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
   // one) is honored on every profile, `full` included (#2322 blocker 2).
   const _commandsDir = path.join(src, 'commands', 'gsd');
   const _skillsManifest = _isCoreProfileAlias ? new Map() : loadSkillsManifest(_commandsDir);
-  const _resolvedProfile = resolveProfile({
+  let _resolvedProfile = resolveProfile({
     modes: [_activeProfileName],
     manifest: _skillsManifest,
     registry: _installedCapabilityRegistry,
@@ -10905,6 +10910,19 @@ function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
   if (_isSkillsRuntime) {
     // Layout-driven install for skills-based runtimes (full and minimal modes)
     const scope = _installScopeId;
+    // Preserve an existing Runtime Surface selection during upgrades. The
+    // installer refreshes the source corpus first, then emits exactly the
+    // already-committed selection instead of widening it to the base profile.
+    const _committedSurface = readSurface(targetDir);
+    if (_committedSurface) {
+      _resolvedProfile = resolveSurface(
+        targetDir,
+        loadSkillsManifest(_commandsDir),
+        undefined,
+        _installedCapabilityRegistry,
+        _committedSurface,
+      );
+    }
     // ADR-1239 upgrade 3 / #2088: a kind may declare an alternate install `home`
     // (e.g. Codex skills -> $HOME/.agents/skills) instead of the runtime's normal
     // configDir. Resolve the ACTUAL on-disk skills root here, descriptor-driven
@@ -11226,6 +11244,13 @@ function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
   } else {
     failures.push('gsd-core');
   }
+
+  // The gsd-core distribution copy above intentionally replaces the entire
+  // installed tree. Re-provision the Runtime Surface corpus afterwards so the
+  // durable raw input survives that replacement; this also leaves Claude's
+  // compatibility marker targeting installation-owned content.
+  const _installedLayout = resolveRuntimeArtifactLayout(runtime, targetDir, _installScopeId);
+  provisionRuntimeSurfaceCorpus(_installedLayout, targetDir, _installScopeId);
 
   // #2624: the .gsd-source marker is now written by _writeGsdSourceMarker()
   // BEFORE staging reads it (see the early call above the _isSkillsRuntime

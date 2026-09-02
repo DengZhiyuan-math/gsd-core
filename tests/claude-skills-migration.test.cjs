@@ -50,6 +50,12 @@ function setupConfigDir(tmpDir, commandFiles) {
   for (const [name, content] of Object.entries(commandFiles)) {
     fs.writeFileSync(path.join(srcDir, name), content);
   }
+  // Claude's layout consumes commands and agents from one atomic provider.
+  // Keep the marker fixture complete so these tests exercise their custom
+  // command bytes instead of correctly falling back to the package corpus.
+  const agentsDir = path.join(tmpDir, 'agents');
+  fs.mkdirSync(agentsDir, { recursive: true });
+  fs.writeFileSync(path.join(agentsDir, 'gsd-fixture-agent.md'), '---\nname: gsd-fixture-agent\n---\n');
   const configDir = path.join(tmpDir, 'config');
   fs.mkdirSync(configDir, { recursive: true });
   // .gsd-source marker tells findInstallSourceRoot to use our custom srcDir
@@ -291,6 +297,13 @@ describe('installRuntimeArtifacts (claude global) — skill layout', () => {
     // an empty dir — _copyStaged then copies nothing into skills/.
     const emptySrc = path.join(tmpDir, 'empty-commands', 'gsd');
     fs.mkdirSync(emptySrc, { recursive: true });
+    // A provider must contain readable source material to be complete. A
+    // non-Markdown file keeps the provider valid while preserving this test's
+    // contract: the command stager still finds zero installable .md files.
+    fs.writeFileSync(path.join(emptySrc, 'README.txt'), 'fixture only\n');
+    const agentsDir = path.join(tmpDir, 'agents');
+    fs.mkdirSync(agentsDir, { recursive: true });
+    fs.writeFileSync(path.join(agentsDir, 'gsd-fixture-agent.md'), '---\nname: gsd-fixture-agent\n---\n');
 
     const configDir = path.join(tmpDir, 'config-empty');
     fs.mkdirSync(configDir, { recursive: true });
