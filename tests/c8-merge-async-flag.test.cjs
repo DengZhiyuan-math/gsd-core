@@ -17,18 +17,34 @@
 // "Coverage gate (merged shards)" test.yml job: test:coverage:scripts-floor. That
 // gap OOM-crashed the coverage gate on every push to next starting at 4dfc46b, once
 // #4068's own new test file plus other suite growth pushed the un-flagged sync merge
-// over the 8192 MB heap ceiling (#4172). check-coverage shares the same
-// getCoverageMapFromAllCoverageFiles()/mergeAsync dispatch as report, so the fix and
-// the guard are identical in shape to #4068's.
+// over the 8192 MB heap ceiling (#4172).
+//
+// IMPORTANT c8@11.0.0 gotcha (verified against node_modules/c8/lib/commands/
+// check-coverage.js and report.js directly): the `check-coverage` CLI subcommand's
+// handler does NOT forward `argv.mergeAsync` into the `Report(...)` constructor --
+// only the `report` subcommand's handler (and the default command, which also calls
+// into report.js's outputReport) does. So `c8 check-coverage --merge-async ...`
+// silently ignores the flag and still OOMs -- confirmed live on PR #4173's CI run
+// after simply adding the flag to the check-coverage invocation did not fix the
+// crash. The actual fix routes test:coverage:scripts-floor through the `report`
+// subcommand with `--check-coverage` (a boolean flag, not a subcommand) instead of
+// the `check-coverage` subcommand directly: `c8 report --check-coverage --lines 55
+// --merge-async --include ...`. This exercises the exact same threshold-checking
+// logic (report.js's outputReport calls the same checkCoverages() helper from
+// check-coverage.js when --check-coverage is truthy) but through the handler that
+// actually wires mergeAsync.
 //
 // This test cannot behaviorally reproduce the OOM itself: `gsd-test` never invokes
 // these npm scripts (it runs `node --test` directly), and a heap-ceiling crossover
 // point is not a stable, portable assertion across this repo's OS x Node matrix on
 // shared benches (see .gsd/bug/fix-4068-coverage-merge-oom/50-test-matrix.md for the
 // full seam analysis). What IS stable and worth guarding: the flag must not silently
-// disappear from the scripts that need it, and must not be added to a script whose
+// disappear from the scripts that need it, must not be added to a script whose
 // merge/report phase never runs (a no-op that would misleadingly imply coverage
-// here too).
+// here too), and -- new for #4172 -- test:coverage:scripts-floor must keep routing
+// through the `report` subcommand rather than reverting to the `check-coverage`
+// subcommand, which would silently re-introduce the OOM despite --merge-async still
+// being present in the script string.
 
 const { describe, test } = require('node:test');
 const assert = require('node:assert/strict');
@@ -63,6 +79,25 @@ describe('coverage-merge-async-flag (#4068, #4172)', () => {
       'test:coverage:scripts-floor (the coverage-gate job scripts/ floor check in ' +
         'test.yml) must pass --merge-async to c8, or it reverts to loading every ' +
         'raw V8 coverage file into memory at once, the same class as #4068 (#4172)'
+    );
+  });
+
+  test('test:coverage:scripts-floor routes through the report subcommand, not check-coverage', () => {
+    const script = scripts['test:coverage:scripts-floor'];
+    assert.match(
+      script,
+      /(?:^|\s)c8\s+report\b/,
+      'test:coverage:scripts-floor must invoke `c8 report --check-coverage ...`, not ' +
+        '`c8 check-coverage ...` -- c8@11.0.0\'s check-coverage subcommand handler ' +
+        'does not forward --merge-async into the Report constructor (verified against ' +
+        'node_modules/c8/lib/commands/check-coverage.js), so that form silently drops ' +
+        'the flag and still OOMs even with --merge-async present in the string (#4172)'
+    );
+    assert.match(
+      script,
+      /--check-coverage\b/,
+      'test:coverage:scripts-floor must pass --check-coverage to `c8 report` so the ' +
+        'coverage threshold is still enforced, not just reported'
     );
   });
 
