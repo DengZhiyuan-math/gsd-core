@@ -249,9 +249,11 @@ function providersShareRequiredRoots(
   right: RuntimeSurfaceSourceProvider,
   required: ReadonlySet<RuntimeSurfaceSourceClass>,
 ): boolean {
+  const leftFs = left.kind === 'package' ? fs : installFs();
+  const rightFs = right.kind === 'package' ? fs : installFs();
   const samePhysicalRoot = (leftRoot: string, rightRoot: string): boolean => {
     try {
-      return fs.realpathSync(leftRoot) === fs.realpathSync(rightRoot);
+      return leftFs.realpathSync(leftRoot) === rightFs.realpathSync(rightRoot);
     } catch {
       return path.resolve(leftRoot) === path.resolve(rightRoot);
     }
