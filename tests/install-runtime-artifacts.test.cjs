@@ -174,6 +174,50 @@ describe('installRuntimeArtifacts — consumes Runtime Artifact Install Plan Mod
 });
 
 describe('installRuntimeArtifacts — durable Runtime Surface corpus (#4132)', () => {
+  test('#4132: provisioning refuses a gsd-core ancestor symlink that escapes configDir', (t) => {
+    const root = createTempDir('gsd-corpus-parent-symlink-');
+    const configDir = path.join(root, 'config');
+    const outside = path.join(root, 'outside');
+    fs.mkdirSync(configDir);
+    fs.mkdirSync(outside);
+    t.after(() => cleanup(root));
+    try {
+      fs.symlinkSync(outside, path.join(configDir, 'gsd-core'), process.platform === 'win32' ? 'junction' : 'dir');
+    } catch (error) {
+      t.skip(`directory symlink creation unavailable: ${error.code || error.message}`);
+      return;
+    }
+
+    assert.throws(
+      () => installRuntimeArtifacts('codex', configDir, 'global', RESOLVED_CORE),
+      /symlink|refusing/i,
+    );
+    assert.equal(fs.existsSync(path.join(outside, 'commands')), false, 'commands must not escape configDir');
+    assert.equal(fs.existsSync(path.join(outside, 'agents')), false, 'agents must not escape configDir');
+  });
+
+  test('#4132: provisioning does not follow a compatibility-marker symlink outside configDir', (t) => {
+    const root = createTempDir('gsd-corpus-marker-symlink-');
+    const configDir = path.join(root, '.claude');
+    const outsideMarker = path.join(root, 'outside-marker');
+    fs.mkdirSync(configDir);
+    fs.writeFileSync(outsideMarker, 'outside sentinel\n');
+    t.after(() => cleanup(root));
+    try {
+      fs.symlinkSync(outsideMarker, path.join(configDir, '.gsd-source'), 'file');
+    } catch (error) {
+      t.skip(`file symlink creation unavailable: ${error.code || error.message}`);
+      return;
+    }
+    runMinimalInstall({ runtime: 'claude', scope: 'global', root });
+
+    assert.equal(
+      fs.readFileSync(outsideMarker, 'utf8'),
+      'outside sentinel\n',
+      'the compatibility marker write must remain confined to configDir',
+    );
+  });
+
   test('global Codex owns the canonical commands and agents corpus', (t) => {
     const configDir = createTempDir('gsd-codex-surface-corpus-');
     t.after(() => cleanup(configDir));

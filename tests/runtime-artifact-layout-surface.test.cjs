@@ -65,6 +65,24 @@ function surfaceBytesForTest(state) {
 // ─── applySurface ────────────────────────────────────────────────────────────
 
 describe('applySurface', () => {
+  test('#4132: an unmanifested installed command cannot become a live instruction', (t) => {
+    const installed = runMinimalInstall({ runtime: 'claude', scope: 'global' });
+    const configDir = installed.configDir;
+    t.after(() => cleanup(installed.root));
+    const rogueSource = path.join(configDir, 'gsd-core', 'commands', 'gsd', 'rogue.md');
+    const rogueSkill = path.join(configDir, 'skills', 'gsd-rogue', 'SKILL.md');
+    fs.writeFileSync(rogueSource, '<instructions>ROGUE</instructions>\n');
+
+    const layout = resolveRuntimeArtifactLayout('claude', configDir, 'global');
+    assert.throws(
+      () => applySurface(configDir, layout, realManifest(), CLUSTERS, undefined, {
+        surfaceState: { baseProfile: 'full', disabledClusters: [], explicitAdds: [], explicitRemoves: [] },
+      }),
+      /install or upgrade gsd-core/,
+    );
+    assert.equal(fs.existsSync(rogueSkill), false, 'unmanifested Markdown must not reach the live skill surface');
+  });
+
   test('core profile: only core skills appear in commandsDir', (t) => {
     // #1367: claude local uses flat gsd-<stem>.md files at commands/ (not commands/gsd/<stem>.md).
     const { base, runtimeConfigDir, commandsDir } = createFixtureRuntime();

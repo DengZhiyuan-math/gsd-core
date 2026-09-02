@@ -1005,7 +1005,33 @@ describe('#1477 .gsd-source marker provisioning', () => {
     );
   });
 
-  test('#4132: deployed findAgentsSourceRoot rejects an installed agents corpus whose hash changed', () => {
+  test('#4132: deployed finder rejects an installed corpus reached through an ancestor symlink', () => {
+    const claudeDir = path.join(tmpRoot, '.claude');
+    fs.mkdirSync(claudeDir, { recursive: true });
+    runInstall(true /* isGlobal */, 'claude');
+
+    const commandsParent = path.join(claudeDir, 'gsd-core', 'commands');
+    const outsideParent = path.join(tmpRoot, 'outside-commands');
+    fs.renameSync(commandsParent, outsideParent);
+    try {
+      fs.symlinkSync(outsideParent, commandsParent, process.platform === 'win32' ? 'junction' : 'dir');
+    } catch (error) {
+      fs.renameSync(outsideParent, commandsParent);
+      if (['EPERM', 'EACCES', 'ENOSYS'].includes(error.code)) return;
+      throw error;
+    }
+
+    const deployedLayoutPath = path.join(claudeDir, 'gsd-core', 'bin', 'lib', 'runtime-artifact-layout.cjs');
+    delete require.cache[deployedLayoutPath];
+    const deployed = require(deployedLayoutPath);
+
+    assert.throws(
+      () => deployed.findInstallSourceRoot(claudeDir),
+      /install or upgrade gsd-core/,
+    );
+  });
+
+  test('#4132: deployed agents layout rejects an installed agents corpus whose hash changed', () => {
     const claudeDir = path.join(tmpRoot, '.claude');
     fs.mkdirSync(claudeDir, { recursive: true });
     runInstall(true /* isGlobal */, 'claude');
@@ -1020,7 +1046,8 @@ describe('#1477 .gsd-source marker provisioning', () => {
     const deployed = require(deployedLayoutPath);
 
     assert.throws(
-      () => deployed.findAgentsSourceRoot(claudeDir),
+      () => deployed.resolveRuntimeArtifactLayout('claude', claudeDir, 'global')
+        .kinds.find((kind) => kind.kind === 'agents').stage(PROFILE_CORE),
       /install or upgrade gsd-core/,
     );
   });

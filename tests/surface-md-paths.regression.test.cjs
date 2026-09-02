@@ -41,6 +41,7 @@ describe('#2116 regression: surface.md resolvable require + correct package', ()
 });
 
 describe('#4132 regression: surface.md uses the state-last public contract', () => {
+  // allow-test-rule: source-text-is-the-product (#4132)
   const content = fs.readFileSync(SURFACE_MD, 'utf-8');
 
   test('mutations pass an in-memory candidate without an eager state write', () => {
