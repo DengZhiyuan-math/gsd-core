@@ -249,8 +249,15 @@ function providersShareRequiredRoots(
   right: RuntimeSurfaceSourceProvider,
   required: ReadonlySet<RuntimeSurfaceSourceClass>,
 ): boolean {
-  return (!required.has('commands') || path.resolve(left.commandsRoot) === path.resolve(right.commandsRoot)) &&
-    (!required.has('agents') || path.resolve(left.agentsRoot) === path.resolve(right.agentsRoot));
+  const samePhysicalRoot = (leftRoot: string, rightRoot: string): boolean => {
+    try {
+      return fs.realpathSync(leftRoot) === fs.realpathSync(rightRoot);
+    } catch {
+      return path.resolve(leftRoot) === path.resolve(rightRoot);
+    }
+  };
+  return (!required.has('commands') || samePhysicalRoot(left.commandsRoot, right.commandsRoot)) &&
+    (!required.has('agents') || samePhysicalRoot(left.agentsRoot, right.agentsRoot));
 }
 
 function markerProvider(runtimeConfigDir: string): RuntimeSurfaceSourceProvider | null {
@@ -299,6 +306,7 @@ function resolveSourceProvider(
   authority: 'installer' | 'runtime' | 'compatible' = 'compatible',
 ): RuntimeSurfaceSourceProvider {
   const required = new Set(requiredClasses);
+  let rejectedInstalled: RuntimeSurfaceSourceProvider | null = null;
   if (required.size === 0) {
     return { kind: 'package', commandsRoot: '', agentsRoot: '' };
   }
@@ -322,6 +330,7 @@ function resolveSourceProvider(
       agentsRoot: path.join(runtimeConfigDir, 'gsd-core', 'agents'),
     };
     if (providerHasRequiredClasses(installed, required, true, runtimeConfigDir)) return installed;
+    rejectedInstalled = installed;
 
     const marker = markerProvider(runtimeConfigDir);
     if (marker && !providersShareRequiredRoots(marker, installed, required) && providerHasRequiredClasses(marker, required, true)) {
@@ -334,7 +343,12 @@ function resolveSourceProvider(
 
   if (authority === 'compatible') {
     const packaged = packageProvider(required);
-    if (packaged) return packaged;
+    if (
+      packaged &&
+      (!rejectedInstalled || !providersShareRequiredRoots(packaged, rejectedInstalled, required))
+    ) {
+      return packaged;
+    }
   }
 
   throw new Error(
