@@ -29,7 +29,7 @@ const os = require('node:os');
 const espree = require('espree');
 const { splitLines, joinLines } = require('../gsd-core/bin/lib/text-lines.cjs');
 
-const { createTempDir, cleanup } = require('./helpers.cjs');
+const { createTempDir, cleanup, asInstallerLayout } = require('./helpers.cjs');
 const { runNode } = require('./helpers/process-seam.cjs');
 const { INSTALL_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
 const {
@@ -59,8 +59,8 @@ const {
 
 const {
   resolveRuntimeArtifactLayout,
-  resolveRuntimeArtifactLayoutForInstall,
 } = require('../gsd-core/bin/lib/runtime-artifact-layout.cjs');
+const resolveRuntimeArtifactLayoutForInstall = (...args) => asInstallerLayout(resolveRuntimeArtifactLayout(...args));
 
 const { applySurface } = require('../gsd-core/bin/lib/surface.cjs');
 const { escapeRegex } = require('../gsd-core/bin/lib/pattern.cjs');
@@ -200,8 +200,13 @@ describe('installRuntimeArtifacts — durable Runtime Surface corpus (#4132)', (
     const root = createTempDir('gsd-corpus-marker-symlink-');
     const configDir = path.join(root, '.claude');
     const outsideMarker = path.join(root, 'outside-marker');
+    const outsideCheckout = path.join(root, 'outside-checkout');
     fs.mkdirSync(configDir);
-    fs.writeFileSync(outsideMarker, 'outside sentinel\n');
+    fs.cpSync(path.join(__dirname, '..', 'commands'), path.join(outsideCheckout, 'commands'), { recursive: true });
+    fs.cpSync(path.join(__dirname, '..', 'agents'), path.join(outsideCheckout, 'agents'), { recursive: true });
+    fs.appendFileSync(path.join(outsideCheckout, 'commands', 'gsd', 'help.md'), '\nMARKER_SYMLINK_SOURCE\n');
+    const outsideMarkerBytes = path.join(outsideCheckout, 'commands', 'gsd') + '\n';
+    fs.writeFileSync(outsideMarker, outsideMarkerBytes);
     t.after(() => cleanup(root));
     try {
       fs.symlinkSync(outsideMarker, path.join(configDir, '.gsd-source'), 'file');
@@ -213,8 +218,13 @@ describe('installRuntimeArtifacts — durable Runtime Surface corpus (#4132)', (
 
     assert.equal(
       fs.readFileSync(outsideMarker, 'utf8'),
-      'outside sentinel\n',
+      outsideMarkerBytes,
       'the compatibility marker write must remain confined to configDir',
+    );
+    assert.doesNotMatch(
+      fs.readFileSync(path.join(configDir, 'skills', 'gsd-help', 'SKILL.md'), 'utf8'),
+      /MARKER_SYMLINK_SOURCE/,
+      'the installer must not read a source provider through a symlinked marker file',
     );
   });
 
@@ -2941,8 +2951,7 @@ describe('fix-2644 — Cursor has one menu entry per GSD workflow', () => {
       files: { 'commands/gsd-help.md': crypto.createHash('sha256').update(content).digest('hex') },
     }));
 
-    const layout = require('../gsd-core/bin/lib/runtime-artifact-layout.cjs')
-      .resolveRuntimeArtifactLayoutForInstall('cursor', configDir, 'global');
+    const layout = resolveRuntimeArtifactLayoutForInstall('cursor', configDir, 'global');
     applySurface(configDir, layout, MANIFEST);
 
     assert.ok(!fs.existsSync(path.join(commandsDir, 'gsd-help.md')),

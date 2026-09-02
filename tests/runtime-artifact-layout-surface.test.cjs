@@ -14,12 +14,13 @@ const os = require('os');
 
 const { writeSurface, readSurface, resolveSurface, listSurface, applySurface } = require('../gsd-core/bin/lib/surface.cjs');
 const { loadSkillsManifest, writeActiveProfile, resolveProfile } = require('../gsd-core/bin/lib/install-profiles.cjs');
-const { resolveRuntimeArtifactLayout, resolveRuntimeArtifactLayoutForInstall } = require('../gsd-core/bin/lib/runtime-artifact-layout.cjs');
+const { resolveRuntimeArtifactLayout } = require('../gsd-core/bin/lib/runtime-artifact-layout.cjs');
 const { CLUSTERS, allClusteredSkills } = require('../gsd-core/bin/lib/clusters.cjs');
-const { createTempDir, cleanup, sandboxHome } = require('./helpers.cjs');
+const { createTempDir, cleanup, sandboxHome, asInstallerLayout } = require('./helpers.cjs');
 const { runMinimalInstall } = require('./helpers/install-shared.cjs');
 
 const REAL_COMMANDS_DIR = path.join(__dirname, '..', 'commands', 'gsd');
+const resolveRuntimeArtifactLayoutForInstall = (...args) => asInstallerLayout(resolveRuntimeArtifactLayout(...args));
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 

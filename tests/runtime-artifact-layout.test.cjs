@@ -23,11 +23,13 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('node:crypto');
 
-const { resolveRuntimeArtifactLayout, resolveRuntimeArtifactLayoutForInstall, findInstallSourceRoot } = require('../gsd-core/bin/lib/runtime-artifact-layout.cjs');
+const { resolveRuntimeArtifactLayout, findInstallSourceRoot } = require('../gsd-core/bin/lib/runtime-artifact-layout.cjs');
 const capabilityRegistry = require('../gsd-core/bin/lib/capability-registry.cjs');
 const installProfiles = require('../gsd-core/bin/lib/install-profiles.cjs');
 const { install } = require('../bin/install.js');
-const { createTempDir, cleanup, scrubConfigLocationEnv } = require('./helpers.cjs');
+const { createTempDir, cleanup, scrubConfigLocationEnv, asInstallerLayout } = require('./helpers.cjs');
+
+const resolveRuntimeArtifactLayoutForInstall = (...args) => asInstallerLayout(resolveRuntimeArtifactLayout(...args));
 
 const REPO_ROOT = path.join(__dirname, '..');
 
@@ -1005,7 +1007,7 @@ describe('#1477 .gsd-source marker provisioning', () => {
     );
   });
 
-  test('#4132: deployed finder rejects an installed corpus reached through an ancestor symlink', () => {
+  test('#4132: deployed finder rejects an installed corpus reached through an ancestor symlink', (t) => {
     const claudeDir = path.join(tmpRoot, '.claude');
     fs.mkdirSync(claudeDir, { recursive: true });
     runInstall(true /* isGlobal */, 'claude');
@@ -1024,6 +1026,12 @@ describe('#1477 .gsd-source marker provisioning', () => {
     const deployedLayoutPath = path.join(claudeDir, 'gsd-core', 'bin', 'lib', 'runtime-artifact-layout.cjs');
     delete require.cache[deployedLayoutPath];
     const deployed = require(deployedLayoutPath);
+    const priorOptIn = process.env.GSD_ALLOW_SYMLINKED_DEST;
+    process.env.GSD_ALLOW_SYMLINKED_DEST = '1';
+    t.after(() => {
+      if (priorOptIn === undefined) delete process.env.GSD_ALLOW_SYMLINKED_DEST;
+      else process.env.GSD_ALLOW_SYMLINKED_DEST = priorOptIn;
+    });
 
     assert.throws(
       () => deployed.findInstallSourceRoot(claudeDir),

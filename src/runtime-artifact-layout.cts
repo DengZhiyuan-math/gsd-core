@@ -95,10 +95,9 @@ interface CapabilityRegistryForSkills {
 }
 
 /**
- * Cross-cutting context for descriptor-driven agent staging (ADR-1235 §1).
- * Passed as the optional second arg to ArtifactKind.stage() for agents kind
- * entries so that stageAgentsForRuntimeWithConverter can apply the exact
- * inline-loop transform order: pathRewrites → attribution → converter → normalize.
+ * Cross-cutting context for descriptor-driven staging. Installer plans brand
+ * this context internally for every kind; agent kinds additionally use these
+ * fields for the exact pathRewrites → attribution → converter → normalize order.
  */
 interface AgentCtx {
   runtime: string;
@@ -115,8 +114,8 @@ interface ArtifactKind {
   kind: KimiArtifactKindName;
   destSubpath: string;
   prefix: string;
-  /** For agents kind with a converter, accepts an optional AgentCtx as the second
-   *  arg so cross-cutting can be applied pre-converter (ADR-1235 §1). */
+  /** Accepts optional staging context for installer source authority and agent
+   *  pre-converter cross-cutting (ADR-1235 §1). */
   stage: (resolvedProfile: ResolvedProfile, agentCtx?: AgentCtx) => string;
   /** Resolved absolute alternate install root for this kind, if the descriptor
    *  specifies one (e.g. codex skills → $HOME/.agents). Undefined means the
@@ -131,6 +130,7 @@ interface ArtifactKind {
 }
 
 type RuntimeSurfaceSourceClass = 'commands' | 'agents';
+const INSTALLER_SOURCE_AUTHORITY = Symbol.for('@open-gsd/runtime-artifact-installer-source-authority');
 
 interface RuntimeSurfaceSourceProvider {
   kind: 'installed' | 'marker' | 'package';
@@ -195,9 +195,6 @@ function isReadableDirectory(candidate: string, routed: boolean): boolean {
 }
 
 function isPhysicallyConfinedTo(root: string, candidate: string): boolean {
-  if (process.env.GSD_ALLOW_SYMLINKED_DEST === '1' || process.env.GSD_ALLOW_SYMLINKED_DEST === 'true') {
-    return true;
-  }
   try {
     const physicalRoot = installFs().realpathSync(root);
     const physicalCandidate = installFs().realpathSync(candidate);
@@ -302,6 +299,8 @@ function markerProvider(runtimeConfigDir: string): RuntimeSurfaceSourceProvider 
   const markerPath = path.join(runtimeConfigDir, '.gsd-source');
   try {
     if (!installFs().existsSync(markerPath)) return null;
+    const markerStat = installFs().lstatSync(markerPath);
+    if (!markerStat.isFile() || markerStat.isSymbolicLink()) return null;
     const commandsRoot = installFs().readFileSync(markerPath, 'utf8').trim();
     if (!commandsRoot) return null;
     return {
@@ -395,12 +394,20 @@ function resolveSourceProvider(
   );
 }
 
-function sourceRootFor(context: SourceResolutionContext, sourceClass: RuntimeSurfaceSourceClass): string {
+function sourceRootFor(
+  context: SourceResolutionContext,
+  sourceClass: RuntimeSurfaceSourceClass,
+  stageContext?: AgentCtx,
+): string {
+  const authority = stageContext &&
+    (stageContext as unknown as Record<symbol, unknown>)[INSTALLER_SOURCE_AUTHORITY] === true
+    ? 'installer'
+    : context.authority;
   context.provider ??= resolveSourceProvider(
     context.runtimeConfigDir,
     context.required,
     context.scope,
-    context.authority,
+    authority,
   );
   return sourceClass === 'commands' ? context.provider.commandsRoot : context.provider.agentsRoot;
 }
@@ -418,7 +425,7 @@ function commandsKind(destSubpath: string, prefix: string, sourceContext: Source
     kind: 'commands',
     destSubpath,
     prefix,
-    stage: (resolved) => stageSkillsForProfile(sourceRootFor(sourceContext, 'commands'), resolved),
+    stage: (resolved, stageContext) => stageSkillsForProfile(sourceRootFor(sourceContext, 'commands', stageContext), resolved),
   };
 }
 
@@ -446,11 +453,11 @@ function agentsKind(destSubpath: string, prefix: string, configDir: string, sour
     // a caller with NO agentCtx in scope is unaffected (row I2: converter-only,
     // as today), matching stageAgentsForRuntimeWithConverter's own contract.
     stage: (resolved, agentCtx) => stageAgentsForRuntimeWithConverter(
-      sourceRootFor(sourceContext, 'agents'),
+      sourceRootFor(sourceContext, 'agents', agentCtx),
       resolved,
       (content: string) => content,
       false,
-      agentCtx,
+      agentCtx?.runtime ? agentCtx : undefined,
     ),
   };
 }
@@ -668,11 +675,11 @@ function convertedAgentsKind(
       // for descriptor-driven runtimes), thread it through so stageAgentsForRuntimeWithConverter
       // can apply the full pre-converter + post-converter sequence in the correct order.
       return stageAgentsForRuntimeWithConverter(
-        sourceRootFor(sourceContext, 'agents'),
+        sourceRootFor(sourceContext, 'agents', agentCtx),
         resolved,
         converter,
         isGlobalScope(scope),
-        agentCtx,
+        agentCtx?.runtime ? agentCtx : undefined,
       );
     },
   };
@@ -683,7 +690,7 @@ function kimiAgentsKind(destSubpath: string, prefix: string, configDir: string, 
     kind: 'kimi-agents',
     destSubpath,
     prefix,
-    stage: (resolved) => {
+    stage: (resolved, stageContext) => {
       const buildKimiAgentArtifacts = conversionExports['buildKimiAgentArtifacts'] as (opts: {
         rootAgent?: string;
         subagents?: Array<{ path: string; content: string }>;
@@ -694,7 +701,7 @@ function kimiAgentsKind(destSubpath: string, prefix: string, configDir: string, 
       // #2995: compose at staging (identity converter) so the readFileSync below
       // sees marker-free content — same single composing stager as agentsKind.
       const stagedAgents = stageAgentsForRuntimeWithConverter(
-        sourceRootFor(sourceContext, 'agents'),
+        sourceRootFor(sourceContext, 'agents', stageContext),
         resolved,
         (content: string) => content,
       );
@@ -761,7 +768,7 @@ function skillsKind(
     destSubpath,
     prefix,
     converter: converterName,
-    stage: (resolved) => {
+    stage: (resolved, stageContext) => {
       const realConverter = _resolveNamedConverter(converterName, 'skills') as (content: string, skillName: string, runtime: string, cmdNames: string[], isGlobal: boolean) => string;
       // Compute cmdNames once per stage call for performance (#3583).
       // Extra trailing args are ignored by converters that don't need them. The
@@ -789,7 +796,7 @@ function skillsKind(
       // rewritten shape.
       const wrappedConverter = (content: string, skillName: string): string =>
         realConverter(content, skillName, runtime, cmdNames, isGlobal);
-      return stageSkillsForRuntimeAsSkills(sourceRootFor(sourceContext, 'commands'), resolved, wrappedConverter, prefix, nested, capabilityRegistry);
+      return stageSkillsForRuntimeAsSkills(sourceRootFor(sourceContext, 'commands', stageContext), resolved, wrappedConverter, prefix, nested, capabilityRegistry);
     },
   };
 }
@@ -820,9 +827,9 @@ function convertedCommandsKind(
     kind: 'commands',
     destSubpath,
     prefix,
-    stage: (resolved) => {
+    stage: (resolved, stageContext) => {
       const converter = _resolveNamedConverter(converterName, 'commands') as (content: string, commandName: string) => string;
-      return stageCommandsForRuntimeFlat(sourceRootFor(sourceContext, 'commands'), resolved, converter, prefix);
+      return stageCommandsForRuntimeFlat(sourceRootFor(sourceContext, 'commands', stageContext), resolved, converter, prefix);
     },
   };
 }
@@ -989,20 +996,7 @@ function resolveRuntimeArtifactLayoutFromRegistry(
   scope: 'local' | 'global' = 'global',
   capabilityRegistry?: CapabilityRegistryForSkills,
 ): Layout {
-  return resolveRuntimeArtifactLayoutInternal(registry, runtime, configDir, scope, capabilityRegistry, false);
-}
-
-/** Installer-only variant: eagerly freezes one complete compatibility-marker
- * or executing-package provider before provisioning mutates the installed
- * corpus. Keeping this separate preserves resolveRuntimeArtifactLayout's
- * placement-only, no-I/O resolution contract (ADR-3660). */
-function resolveRuntimeArtifactLayoutForInstall(
-  runtime: string,
-  configDir: string,
-  scope: 'local' | 'global' = 'global',
-  capabilityRegistry?: CapabilityRegistryForSkills,
-): Layout {
-  return resolveRuntimeArtifactLayoutInternal(getRegistry(), runtime, configDir, scope, capabilityRegistry, true);
+  return resolveRuntimeArtifactLayoutInternal(registry, runtime, configDir, scope, capabilityRegistry);
 }
 
 function resolveRuntimeArtifactLayoutInternal(
@@ -1011,7 +1005,6 @@ function resolveRuntimeArtifactLayoutInternal(
   configDir: string,
   scope: 'local' | 'global',
   capabilityRegistry: CapabilityRegistryForSkills | undefined,
-  freezeInstallerProvider: boolean,
 ): Layout {
   if (typeof configDir !== 'string' || configDir === '') {
     throw new TypeError('configDir must be a non-empty string');
@@ -1043,10 +1036,7 @@ function resolveRuntimeArtifactLayoutInternal(
     runtimeConfigDir: configDir,
     scope,
     required,
-    authority: freezeInstallerProvider ? 'installer' : scope === 'local' ? 'compatible' : 'runtime',
-    provider: required.size > 0 && freezeInstallerProvider
-      ? resolveSourceProvider(configDir, required, scope, 'installer')
-      : undefined,
+    authority: scope === 'local' ? 'compatible' : 'runtime',
   };
   const kinds: ArtifactKind[] = entries.map((entry) => dispatchKindEntry(entry, runtime, configDir, scope, capabilityRegistry, sourceContext));
 
@@ -1336,4 +1326,4 @@ function resolveTriggerSurface(runtime: string, scopes: InstallScope[], opts: Tr
 }
 
 // getInstallExports removed in ADR-1508 / #1511 Phase 2 (last upward .cts→install.js dep).
-export = { resolveRuntimeArtifactLayout, resolveRuntimeArtifactLayoutForInstall, resolveRuntimeArtifactLayoutFromRegistry, findInstallSourceRoot, resolveTriggerSurface, isNamespacedByDir, composeCommandFilename };
+export = { resolveRuntimeArtifactLayout, resolveRuntimeArtifactLayoutFromRegistry, findInstallSourceRoot, resolveTriggerSurface, isNamespacedByDir, composeCommandFilename };

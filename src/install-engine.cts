@@ -1170,7 +1170,7 @@ function installRuntimeArtifacts(
   deps: { fs?: any; os?: any; env?: Record<string, string | undefined>; packageRoot?: string } = {},
 ): any {
   return withInstallFs(deps.fs, (): any => {
-    const layout = runtimeArtifactLayout.resolveRuntimeArtifactLayoutForInstall(
+    const layout = runtimeArtifactLayout.resolveRuntimeArtifactLayout(
       runtime,
       configDir,
       scope as 'global' | 'local',
@@ -1640,9 +1640,9 @@ function installAgentsKindStandalone(
   capabilityRegistry?: any,
 ): { sourceDir: string; destDir: string } | null {
   const layout: Pick<
-    ReturnType<typeof runtimeArtifactLayout.resolveRuntimeArtifactLayoutForInstall>,
+    ReturnType<typeof runtimeArtifactLayout.resolveRuntimeArtifactLayout>,
     'runtime' | 'kinds'
-  > = runtimeArtifactLayout.resolveRuntimeArtifactLayoutForInstall(runtime, targetDir, scope as 'global' | 'local', capabilityRegistry);
+  > = runtimeArtifactLayout.resolveRuntimeArtifactLayout(runtime, targetDir, scope as 'global' | 'local', capabilityRegistry);
   const agentsKindEntry = layout.kinds.find((kind) => kind.kind === 'agents');
   if (!agentsKindEntry) return null;
   // #3712: this writer selects `agentsKindEntry.home` over targetDir below and then
@@ -1659,7 +1659,10 @@ function installAgentsKindStandalone(
   // targetDir IS the install root the inline agent loop called `targetDir`.
   const attribution = resolveAttribution ? resolveAttribution(runtime) : undefined;
   const agentCtx = { runtime, pathPrefix, attribution, targetDir };
-  const stagedDir: string = agentsKindEntry.stage(resolvedProfile, agentCtx);
+  const stagedDir: string = agentsKindEntry.stage(resolvedProfile, {
+    ...agentCtx,
+    [Symbol.for('@open-gsd/runtime-artifact-installer-source-authority')]: true,
+  });
 
   const stagedAgentFiles: string[] = installFs().existsSync(stagedDir)
     ? installFs().readdirSync(stagedDir).filter((f: string) => f.endsWith('.md'))
