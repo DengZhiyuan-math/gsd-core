@@ -1,6 +1,6 @@
 ---
 type: Fixed
-pr: 4132
+pr: 4182
 ---
 **Global Runtime Surface changes now remain materializable after the installing package disappears.** Source-dependent global installs provision manifest-owned raw command and agent corpora below `gsd-core/`, while agents-only and empty layouts receive only what their descriptors require. Source selection uses one complete provider for the whole layout, retains the complete legacy marker path, rejects missing or hash-mismatched corpora, and preserves local-install behavior.
 
