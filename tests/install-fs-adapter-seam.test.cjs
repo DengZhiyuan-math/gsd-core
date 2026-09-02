@@ -38,6 +38,9 @@ const {
   withInstallFs,
 } = require('../gsd-core/bin/lib/install-fs-adapter.cjs');
 const {
+  findInstallSourceRoot,
+} = require('../gsd-core/bin/lib/runtime-artifact-layout.cjs');
+const {
   stageSkillsForRuntimeAsSkills,
   cleanupStagedSkills,
   STAGED_DIRS,
@@ -151,6 +154,39 @@ describe('command-roster readGsdCommandNames — package-source read stays unrou
       expectedStems,
       'readGsdCommandNames must return the real package command stems, reading real fs directly, ' +
       'not the injected (poisoning) fake install adapter',
+    );
+  });
+});
+
+describe('runtime artifact source identity — destination probes stay routed', () => {
+  test('#4132: an installed-root alias is resolved through installFs without routing the package root', () => {
+    const configDir = path.join(os.tmpdir(), `gsd-fake-config-${crypto.randomUUID()}`);
+    const installedCommands = path.join(configDir, 'gsd-core', 'commands', 'gsd');
+    const probes = [];
+    const missing = (p) => {
+      const error = new Error(`ENOENT: no such file or directory, '${p}'`);
+      error.code = 'ENOENT';
+      throw error;
+    };
+    const fakeFs = {
+      existsSync: () => false,
+      lstatSync: missing,
+      realpathSync: (p) => {
+        probes.push(path.normalize(String(p)));
+        return path.normalize(String(p)) === path.normalize(installedCommands)
+          ? fs.realpathSync(REAL_COMMANDS_DIR)
+          : path.normalize(String(p));
+      },
+    };
+
+    assert.throws(
+      () => withInstallFs(fakeFs, () => findInstallSourceRoot(configDir)),
+      /install or upgrade gsd-core/,
+    );
+    assert.deepStrictEqual(
+      probes,
+      [path.normalize(installedCommands)],
+      'installed destination identity must use installFs, while package-source identity stays on raw fs',
     );
   });
 });
