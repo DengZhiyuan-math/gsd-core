@@ -16,11 +16,10 @@ const { writeSurface, readSurface, resolveSurface, listSurface, applySurface } =
 const { loadSkillsManifest, writeActiveProfile, resolveProfile } = require('../gsd-core/bin/lib/install-profiles.cjs');
 const { resolveRuntimeArtifactLayout } = require('../gsd-core/bin/lib/runtime-artifact-layout.cjs');
 const { CLUSTERS, allClusteredSkills } = require('../gsd-core/bin/lib/clusters.cjs');
-const { createTempDir, cleanup, sandboxHome, asInstallerLayout } = require('./helpers.cjs');
+const { createTempDir, cleanup, sandboxHome, writePackageSourceMarkerFixture } = require('./helpers.cjs');
 const { runMinimalInstall } = require('./helpers/install-shared.cjs');
 
 const REAL_COMMANDS_DIR = path.join(__dirname, '..', 'commands', 'gsd');
-const resolveRuntimeArtifactLayoutForInstall = (...args) => asInstallerLayout(resolveRuntimeArtifactLayout(...args));
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
@@ -82,6 +81,43 @@ describe('applySurface', () => {
       /install or upgrade gsd-core/,
     );
     assert.equal(fs.existsSync(rogueSkill), false, 'unmanifested Markdown must not reach the live skill surface');
+  });
+
+  test('#4132: a marker below rejected installed commands cannot promote instructions', (t) => {
+    const installed = runMinimalInstall({ runtime: 'claude', scope: 'global' });
+    const configDir = installed.configDir;
+    t.after(() => cleanup(installed.root));
+
+    const manifest = JSON.parse(fs.readFileSync(path.join(configDir, 'gsd-file-manifest.json'), 'utf8'));
+    const commandKey = Object.keys(manifest.files).find((key) => key.startsWith('gsd-core/commands/gsd/'));
+    assert.ok(commandKey, 'precondition: install manifest must own a command corpus file');
+    fs.appendFileSync(path.join(configDir, ...commandKey.split('/')), '\n# corrupted after install\n');
+
+    const installedCommands = path.join(configDir, 'gsd-core', 'commands', 'gsd');
+    const nestedMarkerCommands = path.join(installedCommands, 'nested');
+    const markerAgents = path.resolve(path.dirname(nestedMarkerCommands), '..', 'agents');
+    fs.mkdirSync(nestedMarkerCommands, { recursive: true });
+    fs.mkdirSync(markerAgents, { recursive: true });
+    fs.writeFileSync(path.join(nestedMarkerCommands, 'rogue.md'), '<instructions>ROGUE</instructions>\n');
+    fs.copyFileSync(path.join(__dirname, '..', 'agents', 'gsd-planner.md'), path.join(markerAgents, 'gsd-planner.md'));
+    fs.appendFileSync(path.join(markerAgents, 'gsd-planner.md'), '\nMARKER_AGENT_USED\n');
+    fs.writeFileSync(path.join(configDir, '.gsd-source'), nestedMarkerCommands + '\n');
+
+    const rogueSkill = path.join(configDir, 'skills', 'gsd-rogue', 'SKILL.md');
+    const liveAgent = path.join(configDir, 'agents', 'gsd-planner.md');
+    const oldAgent = fs.readFileSync(liveAgent);
+    const oldState = { baseProfile: 'full', disabledClusters: [], explicitAdds: [], explicitRemoves: [] };
+    writeSurface(configDir, oldState);
+    const oldSurface = fs.readFileSync(path.join(configDir, '.gsd-surface.json'));
+
+    const layout = resolveRuntimeArtifactLayout('claude', configDir, 'global');
+    assert.throws(
+      () => applySurface(configDir, layout, realManifest(), CLUSTERS, undefined, { surfaceState: oldState }),
+      /install or upgrade gsd-core/,
+    );
+    assert.equal(fs.existsSync(rogueSkill), false, 'nested marker Markdown must not reach the live skill surface');
+    assert.deepEqual(fs.readFileSync(liveAgent), oldAgent, 'marker agents must not replace live agents');
+    assert.deepEqual(fs.readFileSync(path.join(configDir, '.gsd-surface.json')), oldSurface);
   });
 
   test('core profile: only core skills appear in commandsDir', (t) => {
@@ -349,6 +385,7 @@ describe('applySurface', () => {
   test('applySurface writes gsd-prefixed command files matching install and preserves user commands (#816)', (t) => {
     const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-surface-816-'));
     t.after(() => cleanup(configDir));
+    writePackageSourceMarkerFixture(configDir);
 
     writeActiveProfile(configDir, 'standard');
     writeSurface(configDir, {
@@ -359,7 +396,7 @@ describe('applySurface', () => {
     });
 
     // Determine the command dest dir for opencode: commandsKind destSubpath='commands' (#2329)
-    const layout = resolveRuntimeArtifactLayoutForInstall('opencode', configDir, 'global');
+    const layout = resolveRuntimeArtifactLayout('opencode', configDir, 'global');
     const commandsKind = layout.kinds.find(k => k.kind === 'commands');
     assert.ok(commandsKind, 'opencode layout must have a commands kind');
     const commandDir = path.join(configDir, commandsKind.destSubpath);
@@ -431,6 +468,7 @@ describe('applySurface', () => {
       const installDir = fs.mkdtempSync(path.join(os.tmpdir(), `gsd-816-install-${runtime}-`));
       const surfaceDir = fs.mkdtempSync(path.join(os.tmpdir(), `gsd-816-surface-${runtime}-`));
       t.after(() => { cleanup(installDir); cleanup(surfaceDir); });
+      writePackageSourceMarkerFixture(surfaceDir);
 
       // --- Install path ---
       installRuntimeArtifacts(runtime, installDir, 'global', resolvedProfile);
@@ -443,7 +481,7 @@ describe('applySurface', () => {
         explicitAdds: [],
         explicitRemoves: [],
       });
-      const layout = resolveRuntimeArtifactLayoutForInstall(runtime, surfaceDir, 'global');
+      const layout = resolveRuntimeArtifactLayout(runtime, surfaceDir, 'global');
       applySurface(surfaceDir, layout, manifest, CLUSTERS);
 
       // --- Find commands kind ---
@@ -1338,11 +1376,12 @@ describe('skills-kind destination parity: installer vs surface-apply (#2911)', (
       for (const runtime of RUNTIME_IDS) {
         const configDir = fs.mkdtempSync(path.join(os.tmpdir(), `gsd-2911-parity-${runtime}-${scope}-`));
         t.after(() => cleanup(configDir));
+        writePackageSourceMarkerFixture(configDir);
 
         withFakeHome(fakeHome, () => {
           let layout;
           try {
-            layout = resolveRuntimeArtifactLayoutForInstall(runtime, configDir, scope);
+            layout = resolveRuntimeArtifactLayout(runtime, configDir, scope);
           } catch {
             return; // runtime/scope combination not supported
           }
@@ -1432,6 +1471,7 @@ describe('codex skills-kind destination: home override (#2911)', () => {
     t.after(() => cleanup(fakeHome));
     const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-2911-codex-home-dir-'));
     t.after(() => cleanup(codexHome));
+    writePackageSourceMarkerFixture(codexHome);
 
     withFakeHome(fakeHome, () => {
       const manifest = loadSkillsManifest(REAL_COMMANDS_DIR);
@@ -1442,7 +1482,7 @@ describe('codex skills-kind destination: home override (#2911)', () => {
         explicitAdds: [],
         explicitRemoves: [],
       });
-      const layout = resolveRuntimeArtifactLayoutForInstall('codex', codexHome, 'global');
+      const layout = resolveRuntimeArtifactLayout('codex', codexHome, 'global');
       const skillsKind = layout.kinds.find((k) => k.kind === 'skills');
       assert.ok(skillsKind, 'pre-condition: codex global layout has a skills kind');
       assert.strictEqual(skillsKind.home, path.join(fakeHome, '.agents'), 'pre-condition: codex skills kind declares the $HOME/.agents override');
@@ -1514,7 +1554,7 @@ describe('installOpencodeFamilySkills destination parity (#2911 sibling coverage
   const runtimeArtifactLayoutModule = require('../gsd-core/bin/lib/runtime-artifact-layout.cjs');
 
   function stageRawCommands(runtime, configDir) {
-    const layout = resolveRuntimeArtifactLayoutForInstall(runtime, configDir, 'global');
+    const layout = resolveRuntimeArtifactLayout(runtime, configDir, 'global');
     const commandsKind = layout.kinds.find((k) => k.kind === 'commands');
     return commandsKind.stage(resolveProfile({ modes: ['core'], manifest: loadSkillsManifest(REAL_COMMANDS_DIR) }));
   }
@@ -1524,6 +1564,7 @@ describe('installOpencodeFamilySkills destination parity (#2911 sibling coverage
       const configDir = fs.mkdtempSync(path.join(os.tmpdir(), `gsd-2911-ocfs-${runtime}-`));
       const fakeHomeOverride = fs.mkdtempSync(path.join(os.tmpdir(), `gsd-2911-ocfs-home-${runtime}-`));
       t.after(() => { cleanup(configDir); cleanup(fakeHomeOverride); });
+      writePackageSourceMarkerFixture(configDir);
       // #3712 — this row drives a skills-kind `home` override on purpose, which is
       // exactly what the test-home guard exists to police, so it has to declare the
       // sandbox rather than rely on the destination happening to sit outside the

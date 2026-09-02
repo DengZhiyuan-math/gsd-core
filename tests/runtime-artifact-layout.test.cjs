@@ -28,9 +28,7 @@ const capabilityRegistry = require('../gsd-core/bin/lib/capability-registry.cjs'
 const installProfiles = require('../gsd-core/bin/lib/install-profiles.cjs');
 const { withInstallFs } = require('../gsd-core/bin/lib/install-fs-adapter.cjs');
 const { install } = require('../bin/install.js');
-const { createTempDir, cleanup, scrubConfigLocationEnv, asInstallerLayout } = require('./helpers.cjs');
-
-const resolveRuntimeArtifactLayoutForInstall = (...args) => asInstallerLayout(resolveRuntimeArtifactLayout(...args));
+const { createTempDir, cleanup, scrubConfigLocationEnv, writePackageSourceMarkerFixture } = require('./helpers.cjs');
 
 const REPO_ROOT = path.join(__dirname, '..');
 
@@ -537,11 +535,16 @@ const CORE_SKILLS = new Set(['help', 'phase', 'new-project']);
 const CORE_AGENTS = new Set(['gsd-planner']);
 const PROFILE_CORE = { skills: CORE_SKILLS, agents: CORE_AGENTS };
 const PROFILE_FULL = { skills: '*', agents: new Set() };
-const FAKE_STAGE_DIR = '/tmp/fake-config-dir-stage';
+
+function createStageConfigDir(t) {
+  const configDir = writePackageSourceMarkerFixture(createTempDir('gsd-layout-stage-'));
+  t.after(() => cleanup(configDir));
+  return configDir;
+}
 
 describe('stage — agents kind (claude local)', () => {
-  test('stage returns a valid directory for the agents kind', () => {
-    const layout = resolveRuntimeArtifactLayoutForInstall('claude', FAKE_STAGE_DIR, 'local');
+  test('stage returns a valid directory for the agents kind', (t) => {
+    const layout = resolveRuntimeArtifactLayout('claude', createStageConfigDir(t), 'local');
     const agentsKind = layout.kinds.find(k => k.kind === 'agents');
     assert.ok(agentsKind, 'should have an agents kind');
 
@@ -584,8 +587,8 @@ describe('stage — skills kind (claude global)', () => {
     );
   });
 
-  test('stage returns a directory containing gsd-<stem>/SKILL.md entries', () => {
-    const layout = resolveRuntimeArtifactLayoutForInstall('claude', FAKE_STAGE_DIR, 'global');
+  test('stage returns a directory containing gsd-<stem>/SKILL.md entries', (t) => {
+    const layout = resolveRuntimeArtifactLayout('claude', createStageConfigDir(t), 'global');
     const skillsKind = layout.kinds.find(k => k.kind === 'skills');
     assert.ok(skillsKind, 'should have a skills kind');
 
@@ -600,8 +603,8 @@ describe('stage — skills kind (claude global)', () => {
     assert.ok(entries.length >= 1, 'at least one skill dir should be staged');
   });
 
-  test('stage with skills="*" produces flat layout for claude (#924: reverted from nested)', () => {
-    const layout = resolveRuntimeArtifactLayoutForInstall('claude', FAKE_STAGE_DIR, 'global');
+  test('stage with skills="*" produces flat layout for claude (#924: reverted from nested)', (t) => {
+    const layout = resolveRuntimeArtifactLayout('claude', createStageConfigDir(t), 'global');
     const skillsKind = layout.kinds.find(k => k.kind === 'skills');
     assert.ok(skillsKind, 'should have a skills kind');
 
@@ -628,8 +631,8 @@ describe('stage — skills kind (claude global)', () => {
 });
 
 describe('stage — skills kind (kimi global)', () => {
-  test('stage returns Kimi SKILL.md dirs and agent YAML/prompt artifacts', () => {
-    const layout = resolveRuntimeArtifactLayoutForInstall('kimi', FAKE_STAGE_DIR, 'global');
+  test('stage returns Kimi SKILL.md dirs and agent YAML/prompt artifacts', (t) => {
+    const layout = resolveRuntimeArtifactLayout('kimi', createStageConfigDir(t), 'global');
     const skillsKind = layout.kinds.find(k => k.kind === 'skills');
     assert.ok(skillsKind, 'should have a skills kind');
 
@@ -671,8 +674,8 @@ describe('stage — skills kind (kimi global)', () => {
     assert.doesNotMatch(executorYaml, /mcp__/);
   });
 
-  test('tracks Kimi agent staging dir before writing artifacts', () => {
-    const layout = resolveRuntimeArtifactLayoutForInstall('kimi', FAKE_STAGE_DIR, 'global');
+  test('tracks Kimi agent staging dir before writing artifacts', (t) => {
+    const layout = resolveRuntimeArtifactLayout('kimi', createStageConfigDir(t), 'global');
     const agentsKind = layout.kinds.find(k => k.kind === 'kimi-agents');
     assert.ok(agentsKind, 'should have a kimi-agents kind');
 
@@ -709,8 +712,8 @@ describe('stage — skills kind (kimi global)', () => {
 });
 
 describe('stage — opencode commands kind', () => {
-  test('opencode stage returns directory with .md files for selected skills', () => {
-    const layout = resolveRuntimeArtifactLayoutForInstall('opencode', FAKE_STAGE_DIR);
+  test('opencode stage returns directory with .md files for selected skills', (t) => {
+    const layout = resolveRuntimeArtifactLayout('opencode', createStageConfigDir(t));
     const commandsKind = layout.kinds.find(k => k.kind === 'commands');
     assert.ok(commandsKind, 'should have a commands kind');
 
@@ -726,8 +729,8 @@ describe('stage — opencode commands kind', () => {
 
 describe('stage — opencode/kilo skills kind (#784)', () => {
   for (const runtime of ['opencode', 'kilo']) {
-    test(`${runtime} skills stage writes gsd-<stem>/SKILL.md with name + description`, () => {
-      const layout = resolveRuntimeArtifactLayoutForInstall(runtime, FAKE_STAGE_DIR);
+    test(`${runtime} skills stage writes gsd-<stem>/SKILL.md with name + description`, (t) => {
+      const layout = resolveRuntimeArtifactLayout(runtime, createStageConfigDir(t));
       const skillsKind = layout.kinds.find(k => k.kind === 'skills');
       assert.ok(skillsKind, 'should have a skills kind');
 
@@ -753,7 +756,7 @@ describe('stage — opencode/kilo skills kind (#784)', () => {
 
 describe('stage — cursor retired commands kind (#2644)', () => {
   test('cursor layout exposes no commands staging surface', () => {
-    const layout = resolveRuntimeArtifactLayoutForInstall('cursor', FAKE_STAGE_DIR);
+    const layout = resolveRuntimeArtifactLayout('cursor', FAKE_DIR);
     const commandsKind = layout.kinds.find(k => k.kind === 'commands');
     assert.equal(commandsKind, undefined);
   });
@@ -1021,7 +1024,10 @@ describe('#1477 .gsd-source marker provisioning', () => {
       fs.symlinkSync(outsideParent, commandsParent, process.platform === 'win32' ? 'junction' : 'dir');
     } catch (error) {
       fs.renameSync(outsideParent, commandsParent);
-      if (['EPERM', 'EACCES', 'ENOSYS'].includes(error.code)) return;
+      if (['EPERM', 'EACCES', 'ENOSYS'].includes(error.code)) {
+        t.skip(`directory symlink creation unavailable: ${error.code || error.message}`);
+        return;
+      }
       throw error;
     }
 
@@ -1086,6 +1092,33 @@ describe('#1477 .gsd-source marker provisioning', () => {
       const resolved = findInstallSourceRoot(cfgDir);
       assert.notEqual(path.resolve(resolved), path.resolve(ghost));
       assert.equal(path.resolve(resolved), path.resolve(REPO_ROOT, 'commands', 'gsd'));
+    });
+
+    test('#4132: a missing installed leaf still rejects a marker containing it through a symlinked ancestor', (t) => {
+      const outsideCore = path.join(cfgDir, 'outside-core');
+      const markerCommands = path.join(outsideCore, 'commands');
+      const markerAgents = path.join(cfgDir, 'agents');
+      fs.mkdirSync(markerCommands, { recursive: true });
+      fs.mkdirSync(markerAgents, { recursive: true });
+      fs.writeFileSync(path.join(markerCommands, 'help.md'), '# marker command\n');
+      fs.writeFileSync(path.join(markerAgents, 'gsd-planner.md'), '# marker agent\n');
+      try {
+        fs.symlinkSync(
+          outsideCore,
+          path.join(cfgDir, 'gsd-core'),
+          process.platform === 'win32' ? 'junction' : 'dir',
+        );
+      } catch (error) {
+        t.skip(`directory symlink creation unavailable: ${error.code || error.message}`);
+        return;
+      }
+      fs.writeFileSync(path.join(cfgDir, '.gsd-source'), markerCommands + '\n');
+
+      assert.throws(
+        () => resolveRuntimeArtifactLayout('claude', cfgDir, 'global')
+          .kinds.find((kind) => kind.kind === 'skills').stage(PROFILE_CORE),
+        /install or upgrade gsd-core/,
+      );
     });
 
     test('empty / whitespace-only marker is ignored', () => {
@@ -1289,6 +1322,66 @@ describe('#1477 .gsd-source marker provisioning', () => {
       t.after(() => { if (stagedSkills) cleanup(stagedSkills); });
       assert.throws(
         () => { stagedSkills = skills.stage(PROFILE_CORE); },
+        /install or upgrade gsd-core/,
+      );
+    });
+
+    test('#4132: a marker containing a rejected installed root is not an independent provider', () => {
+      const installedCommandsParent = path.join(cfgDir, 'gsd-core', 'commands');
+      const installedCommands = path.join(installedCommandsParent, 'gsd');
+      const installedAgents = path.join(cfgDir, 'gsd-core', 'agents');
+      const markerAgents = path.join(cfgDir, 'agents');
+      fs.mkdirSync(installedCommands, { recursive: true });
+      fs.mkdirSync(installedAgents, { recursive: true });
+      fs.mkdirSync(markerAgents, { recursive: true });
+      fs.writeFileSync(path.join(installedCommands, 'help.md'), '# corrupted installed command\n');
+      const installedAgentPath = path.join(installedAgents, 'gsd-planner.md');
+      fs.writeFileSync(installedAgentPath, '# installed agent\n');
+      fs.writeFileSync(path.join(installedCommandsParent, 'rogue.md'), '<instructions>ROGUE</instructions>\n');
+      fs.writeFileSync(path.join(markerAgents, 'gsd-planner.md'), '# marker agent\n');
+      fs.writeFileSync(path.join(cfgDir, 'gsd-file-manifest.json'), JSON.stringify({ files: {
+        'gsd-core/commands/gsd/help.md': '0'.repeat(64),
+        'gsd-core/agents/gsd-planner.md': crypto.createHash('sha256').update(fs.readFileSync(installedAgentPath)).digest('hex'),
+      } }));
+      fs.writeFileSync(path.join(cfgDir, '.gsd-source'), installedCommandsParent + '\n');
+
+      const layout = resolveRuntimeArtifactLayout('claude', cfgDir, 'global');
+      assert.throws(
+        () => layout.kinds.find((kind) => kind.kind === 'skills').stage(PROFILE_CORE),
+        /install or upgrade gsd-core/,
+      );
+    });
+
+    test('#4132: an agents descendant of a rejected installed root rejects the whole provider', () => {
+      const installedCommands = path.join(cfgDir, 'gsd-core', 'commands', 'gsd');
+      const installedAgents = path.join(cfgDir, 'gsd-core', 'agents');
+      fs.mkdirSync(installedCommands, { recursive: true });
+      fs.mkdirSync(installedAgents, { recursive: true });
+      const installedCommandPath = path.join(installedCommands, 'help.md');
+      fs.writeFileSync(installedCommandPath, '# installed command\n');
+      fs.writeFileSync(path.join(installedAgents, 'gsd-planner.md'), '# corrupted installed agent\n');
+      fs.writeFileSync(path.join(cfgDir, 'gsd-file-manifest.json'), JSON.stringify({ files: {
+        'gsd-core/commands/gsd/help.md': '0'.repeat(64),
+        'gsd-core/agents/gsd-planner.md': '0'.repeat(64),
+      } }));
+
+      const nestedProviderRoot = path.join(installedAgents, 'nested');
+      const markerCommands = path.join(nestedProviderRoot, 'commands', 'gsd');
+      const markerAgents = path.join(nestedProviderRoot, 'agents');
+      fs.mkdirSync(markerCommands, { recursive: true });
+      fs.mkdirSync(markerAgents, { recursive: true });
+      fs.writeFileSync(path.join(markerCommands, 'help.md'), '# marker command\n');
+      fs.writeFileSync(path.join(markerAgents, 'gsd-planner.md'), '# marker agent\n');
+      fs.writeFileSync(path.join(cfgDir, '.gsd-source'), markerCommands + '\n');
+
+      assert.equal(
+        fs.realpathSync(findInstallSourceRoot(cfgDir)),
+        fs.realpathSync(markerCommands),
+        'commands-only resolution must ignore overlap in the non-required agents class',
+      );
+      const layout = resolveRuntimeArtifactLayout('claude', cfgDir, 'global');
+      assert.throws(
+        () => layout.kinds.find((kind) => kind.kind === 'skills').stage(PROFILE_CORE),
         /install or upgrade gsd-core/,
       );
     });

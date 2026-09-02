@@ -1111,38 +1111,16 @@ function sandboxHome(t, dir) {
   });
 }
 
-function asInstallerLayout(layout) {
-  const { findInstallSourceRoot } = require('../gsd-core/bin/lib/runtime-artifact-layout.cjs');
-  if (layout.scope !== 'global') return layout;
-  const markerPath = path.join(layout.configDir, '.gsd-source');
-  return {
-    ...layout,
-    kinds: layout.kinds.map((kind) => ({
-      ...kind,
-      stage: (profile, context) => {
-        try {
-          return kind.stage(profile, context);
-        } catch (error) {
-          if (!String(error?.message).startsWith('Runtime Surface source is unavailable or incomplete for ')) {
-            throw error;
-          }
-        }
-        fs.mkdirSync(layout.configDir, { recursive: true });
-        const markerExisted = fs.existsSync(markerPath);
-        const previousMarker = markerExisted ? fs.readFileSync(markerPath) : null;
-        fs.writeFileSync(markerPath, findInstallSourceRoot() + '\n');
-        try {
-          return kind.stage(profile, context);
-        } finally {
-          if (previousMarker !== null) fs.writeFileSync(markerPath, previousMarker);
-          else fs.unlinkSync(markerPath);
-        }
-      },
-    })),
-  };
+function writePackageSourceMarkerFixture(configDir) {
+  fs.mkdirSync(configDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(configDir, '.gsd-source'),
+    path.join(__dirname, '..', 'commands', 'gsd') + '\n',
+  );
+  return configDir;
 }
 
-module.exports = { runGsdTools, createTempDir, createTempProject, createTempGitProject, cleanup, tmpRootCandidates, readFileNormalized, readWorkflowCombined, parseFrontmatter, isUsageOutput, captureConsole, toPosixPath, absPlanningPath, runNpm, isolatedNpmEnv, withIsolatedProcessState, delay, waitFor, resetRuntimeWarningCaches, SESSION_ENV_KEYS, saveSessionEnv, restoreSessionEnv, clearSessionEnv, isolateWorkstreamEnv, restoreWorkstreamEnv, TOOLS_PATH, SESSION_IDENTITY_ENV_KEYS, scrubConfigLocationEnv, installSpawnEnv, installSpawnHome, sandboxHome, asInstallerLayout, TEST_HOME_SANDBOX_MARKER, mockPartialWriteThenThrow };
+module.exports = { runGsdTools, createTempDir, createTempProject, createTempGitProject, cleanup, tmpRootCandidates, readFileNormalized, readWorkflowCombined, parseFrontmatter, isUsageOutput, captureConsole, toPosixPath, absPlanningPath, runNpm, isolatedNpmEnv, withIsolatedProcessState, delay, waitFor, resetRuntimeWarningCaches, SESSION_ENV_KEYS, saveSessionEnv, restoreSessionEnv, clearSessionEnv, isolateWorkstreamEnv, restoreWorkstreamEnv, TOOLS_PATH, SESSION_IDENTITY_ENV_KEYS, scrubConfigLocationEnv, installSpawnEnv, installSpawnHome, sandboxHome, writePackageSourceMarkerFixture, TEST_HOME_SANDBOX_MARKER, mockPartialWriteThenThrow };
 
 // Lazy, for the reason builtLib() is lazy: reading either of these is what
 // forces the built-lib require, so a test file that needs neither can still

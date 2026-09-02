@@ -207,6 +207,9 @@ function installedManifestIsComplete(
   runtimeConfigDir: string,
   required: ReadonlySet<RuntimeSurfaceSourceClass>,
 ): boolean {
+  // This synchronous admission check binds provider selection to the corpus
+  // observed here. Same-user mutation after resolution is outside #4132's
+  // threat model and would require a broader snapshot/transaction design.
   const io = installFs();
   const manifestPath = path.join(runtimeConfigDir, 'gsd-file-manifest.json');
   if (!io.existsSync(manifestPath)) return false;
@@ -283,15 +286,34 @@ function providersShareRequiredRoots(
 ): boolean {
   const leftFs = left.kind === 'package' ? fs : installFs();
   const rightFs = right.kind === 'package' ? fs : installFs();
-  const samePhysicalRoot = (leftRoot: string, rightRoot: string): boolean => {
-    try {
-      return leftFs.realpathSync(leftRoot) === rightFs.realpathSync(rightRoot);
-    } catch {
-      return path.resolve(leftRoot) === path.resolve(rightRoot);
-    }
+  const physicalRootsOverlap = (leftRoot: string, rightRoot: string): boolean => {
+    const canonicalize = (io: typeof leftFs, root: string): string | null => {
+      let existing = path.resolve(root);
+      const missingSegments: string[] = [];
+      while (true) {
+        try {
+          return path.resolve(io.realpathSync(existing), ...missingSegments);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return null;
+          const parent = path.dirname(existing);
+          if (parent === existing) return null;
+          missingSegments.unshift(path.basename(existing));
+          existing = parent;
+        }
+      }
+    };
+    const overlap = (leftPath: string, rightPath: string): boolean => {
+      const relative = path.relative(leftPath, rightPath);
+      return relative === '' ||
+        (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+    };
+    const physicalLeft = canonicalize(leftFs, leftRoot);
+    const physicalRight = canonicalize(rightFs, rightRoot);
+    if (!physicalLeft || !physicalRight) return true;
+    return overlap(physicalLeft, physicalRight) || overlap(physicalRight, physicalLeft);
   };
-  return (required.has('commands') && samePhysicalRoot(left.commandsRoot, right.commandsRoot)) ||
-    (required.has('agents') && samePhysicalRoot(left.agentsRoot, right.agentsRoot));
+  return (required.has('commands') && physicalRootsOverlap(left.commandsRoot, right.commandsRoot)) ||
+    (required.has('agents') && physicalRootsOverlap(left.agentsRoot, right.agentsRoot));
 }
 
 function markerProvider(runtimeConfigDir: string): RuntimeSurfaceSourceProvider | null {

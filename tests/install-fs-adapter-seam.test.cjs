@@ -189,6 +189,37 @@ describe('runtime artifact source identity — destination probes stay routed', 
       'installed destination identity must use installFs, while package-source identity stays on raw fs',
     );
   });
+
+  test('#4132: an unreadable physical root cannot prove a marker is independent', () => {
+    const configDir = path.join(os.tmpdir(), `gsd-fake-config-${crypto.randomUUID()}`);
+    const installedCommands = path.join(configDir, 'gsd-core', 'commands', 'gsd');
+    const markerCommands = path.join(configDir, 'independent', 'commands', 'gsd');
+    const fakeFs = createFakeFs([
+      [configDir, { type: 'dir' }],
+      [path.join(configDir, 'gsd-core'), { type: 'dir' }],
+      [path.join(configDir, 'gsd-core', 'commands'), { type: 'dir' }],
+      [installedCommands, { type: 'dir' }],
+      [path.join(installedCommands, 'help.md'), { type: 'file', content: '# unverified installed command\n' }],
+      [path.join(configDir, 'independent'), { type: 'dir' }],
+      [path.join(configDir, 'independent', 'commands'), { type: 'dir' }],
+      [markerCommands, { type: 'dir' }],
+      [path.join(markerCommands, 'help.md'), { type: 'file', content: '# marker command\n' }],
+      [path.join(configDir, '.gsd-source'), { type: 'file', content: markerCommands + '\n' }],
+    ]);
+    fakeFs.realpathSync = (p) => {
+      if ([installedCommands, markerCommands].includes(path.normalize(String(p)))) {
+        const error = new Error(`EACCES: permission denied, realpath '${p}'`);
+        error.code = 'EACCES';
+        throw error;
+      }
+      return path.normalize(String(p));
+    };
+
+    assert.throws(
+      () => withInstallFs(fakeFs, () => findInstallSourceRoot(configDir)),
+      /install or upgrade gsd-core/,
+    );
+  });
 });
 
 // ─── (b) cleanupStagedSkills must not perform real IO on fake-staged dirs ──

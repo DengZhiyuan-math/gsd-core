@@ -29,7 +29,7 @@ const os = require('node:os');
 const espree = require('espree');
 const { splitLines, joinLines } = require('../gsd-core/bin/lib/text-lines.cjs');
 
-const { createTempDir, cleanup, asInstallerLayout } = require('./helpers.cjs');
+const { createTempDir, cleanup, writePackageSourceMarkerFixture } = require('./helpers.cjs');
 const { runNode } = require('./helpers/process-seam.cjs');
 const { INSTALL_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
 const {
@@ -60,7 +60,6 @@ const {
 const {
   resolveRuntimeArtifactLayout,
 } = require('../gsd-core/bin/lib/runtime-artifact-layout.cjs');
-const resolveRuntimeArtifactLayoutForInstall = (...args) => asInstallerLayout(resolveRuntimeArtifactLayout(...args));
 
 const { applySurface } = require('../gsd-core/bin/lib/surface.cjs');
 const { escapeRegex } = require('../gsd-core/bin/lib/pattern.cjs');
@@ -699,7 +698,7 @@ describe('installRuntimeArtifacts — opencode / kilo flat commands', () => {
 // Stage the raw command set the way the installer's _stageSkills() does, so the
 // skills writer receives the same input as the flattened-command writer.
 function stageRawCommands(runtime, configDir) {
-  const layout = resolveRuntimeArtifactLayoutForInstall(runtime, configDir, 'global');
+  const layout = resolveRuntimeArtifactLayout(runtime, configDir, 'global');
   const commandsKind = layout.kinds.find((k) => k.kind === 'commands');
   return commandsKind.stage(RESOLVED_CORE);
 }
@@ -709,6 +708,7 @@ describe('installOpencodeFamilySkills — emits skills/<name>/SKILL.md (#784)', 
     test(`${runtime}: writes gsd-help/SKILL.md with name + description`, (t) => {
       const configDir = createTempDir(`gsd-ocs-${runtime}-`);
       t.after(() => cleanup(configDir));
+      writePackageSourceMarkerFixture(configDir);
 
       const raw = stageRawCommands(runtime, configDir);
       const count = installOpencodeFamilySkills(runtime, configDir, raw, `${configDir}/`);
@@ -725,6 +725,7 @@ describe('installOpencodeFamilySkills — emits skills/<name>/SKILL.md (#784)', 
     test(`${runtime}: rewrites body paths to the actual install target (#784 path fix)`, (t) => {
       const configDir = createTempDir(`gsd-ocp-${runtime}-`);
       t.after(() => cleanup(configDir));
+      writePackageSourceMarkerFixture(configDir);
 
       // Simulate a custom/local install: pathPrefix points at configDir, NOT the
       // runtime's default global config dir. Body refs must use pathPrefix.
@@ -755,6 +756,7 @@ describe('installOpencodeFamilySkills — emits skills/<name>/SKILL.md (#784)', 
     test(`${runtime}: preserves user-owned gsd-dev-preferences across reinstall (#784)`, (t) => {
       const configDir = createTempDir(`gsd-ocd-${runtime}-`);
       t.after(() => cleanup(configDir));
+      writePackageSourceMarkerFixture(configDir);
 
       const userSkill = path.join(configDir, 'skills', 'gsd-dev-preferences');
       fs.mkdirSync(userSkill, { recursive: true });
@@ -2950,8 +2952,9 @@ describe('fix-2644 — Cursor has one menu entry per GSD workflow', () => {
       version: '1.8.0', timestamp: '2026-07-28T00:00:00.000Z', mode: 'core',
       files: { 'commands/gsd-help.md': crypto.createHash('sha256').update(content).digest('hex') },
     }));
+    writePackageSourceMarkerFixture(configDir);
 
-    const layout = resolveRuntimeArtifactLayoutForInstall('cursor', configDir, 'global');
+    const layout = resolveRuntimeArtifactLayout('cursor', configDir, 'global');
     applySurface(configDir, layout, MANIFEST);
 
     assert.ok(!fs.existsSync(path.join(commandsDir, 'gsd-help.md')),
