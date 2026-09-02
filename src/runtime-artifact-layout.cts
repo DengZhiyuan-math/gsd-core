@@ -256,8 +256,8 @@ function providersShareRequiredRoots(
       return path.resolve(leftRoot) === path.resolve(rightRoot);
     }
   };
-  return (!required.has('commands') || samePhysicalRoot(left.commandsRoot, right.commandsRoot)) &&
-    (!required.has('agents') || samePhysicalRoot(left.agentsRoot, right.agentsRoot));
+  return (required.has('commands') && samePhysicalRoot(left.commandsRoot, right.commandsRoot)) ||
+    (required.has('agents') && samePhysicalRoot(left.agentsRoot, right.agentsRoot));
 }
 
 function markerProvider(runtimeConfigDir: string): RuntimeSurfaceSourceProvider | null {
