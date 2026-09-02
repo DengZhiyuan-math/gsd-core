@@ -984,6 +984,27 @@ describe('#1477 .gsd-source marker provisioning', () => {
     assert.equal(fs.realpathSync(resolved), fs.realpathSync(installedCorpus));
   });
 
+  test('#4132: deployed findInstallSourceRoot rejects an installed commands corpus whose hash changed', () => {
+    const claudeDir = path.join(tmpRoot, '.claude');
+    fs.mkdirSync(claudeDir, { recursive: true });
+    runInstall(true /* isGlobal */, 'claude');
+
+    const manifest = JSON.parse(fs.readFileSync(path.join(claudeDir, 'gsd-file-manifest.json'), 'utf8'));
+    const commandKey = Object.keys(manifest.files).find((key) => key.startsWith('gsd-core/commands/gsd/'));
+    assert.ok(commandKey, 'precondition: install manifest must own at least one command corpus file');
+    const commandPath = path.join(claudeDir, ...commandKey.split('/'));
+    fs.appendFileSync(commandPath, '\n# corrupted after install\n');
+
+    const deployedLayoutPath = path.join(claudeDir, 'gsd-core', 'bin', 'lib', 'runtime-artifact-layout.cjs');
+    delete require.cache[deployedLayoutPath];
+    const deployed = require(deployedLayoutPath);
+
+    assert.throws(
+      () => deployed.findInstallSourceRoot(claudeDir),
+      /install or upgrade gsd-core/,
+    );
+  });
+
   // ── Adversarial marker-reader cases (no full install needed) ─────────────────
   describe('findInstallSourceRoot marker handling', () => {
     let cfgDir;
