@@ -1196,6 +1196,51 @@ describe('#1477 .gsd-source marker provisioning', () => {
       assert.match(fs.readFileSync(path.join(stagedAgents, 'gsd-planner.md'), 'utf8'), /marker agent/);
     });
 
+    test('#4132: a marker aliasing any rejected installed root is not an independent provider', (t) => {
+      const installedCommandsParent = path.join(cfgDir, 'gsd-core', 'commands');
+      const installedCommands = path.join(installedCommandsParent, 'gsd');
+      const installedAgents = path.join(cfgDir, 'gsd-core', 'agents');
+      fs.mkdirSync(installedCommands, { recursive: true });
+      fs.mkdirSync(installedAgents, { recursive: true });
+      fs.writeFileSync(path.join(installedCommands, 'help.md'), '# corrupted installed command\n');
+      const installedAgentPath = path.join(installedAgents, 'gsd-planner.md');
+      fs.writeFileSync(installedAgentPath, '# installed agent\n');
+      fs.writeFileSync(path.join(cfgDir, 'gsd-file-manifest.json'), JSON.stringify({ files: {
+        'gsd-core/commands/gsd/help.md': '0'.repeat(64),
+        'gsd-core/agents/gsd-planner.md': crypto.createHash('sha256').update(fs.readFileSync(installedAgentPath)).digest('hex'),
+      } }));
+
+      const markerRoot = path.join(cfgDir, 'hybrid-marker');
+      fs.mkdirSync(markerRoot, { recursive: true });
+      try {
+        fs.symlinkSync(
+          installedCommandsParent,
+          path.join(markerRoot, 'commands'),
+          process.platform === 'win32' ? 'junction' : 'dir',
+        );
+      } catch (error) {
+        t.skip(`directory symlink creation unavailable: ${error.code || error.message}`);
+        return;
+      }
+      const markerCommands = path.join(markerRoot, 'commands', 'gsd');
+      const markerAgents = path.join(markerRoot, 'agents');
+      fs.mkdirSync(markerAgents, { recursive: true });
+      fs.writeFileSync(path.join(markerAgents, 'gsd-planner.md'), '# independent marker agent\n');
+      fs.writeFileSync(path.join(cfgDir, '.gsd-source'), markerCommands + '\n');
+
+      assert.equal(fs.realpathSync(markerCommands), fs.realpathSync(installedCommands));
+      assert.notEqual(fs.realpathSync(markerAgents), fs.realpathSync(installedAgents));
+
+      const layout = resolveRuntimeArtifactLayout('claude', cfgDir, 'global');
+      const skills = layout.kinds.find((kind) => kind.kind === 'skills');
+      let stagedSkills;
+      t.after(() => { if (stagedSkills) cleanup(stagedSkills); });
+      assert.throws(
+        () => { stagedSkills = skills.stage(PROFILE_CORE); },
+        /install or upgrade gsd-core/,
+      );
+    });
+
     test('manifest-expected missing corpus file fails closed without reusing its marker alias', () => {
       const installedCommands = path.join(cfgDir, 'gsd-core', 'commands', 'gsd');
       const installedAgents = path.join(cfgDir, 'gsd-core', 'agents');
