@@ -1005,6 +1005,26 @@ describe('#1477 .gsd-source marker provisioning', () => {
     );
   });
 
+  test('#4132: deployed findAgentsSourceRoot rejects an installed agents corpus whose hash changed', () => {
+    const claudeDir = path.join(tmpRoot, '.claude');
+    fs.mkdirSync(claudeDir, { recursive: true });
+    runInstall(true /* isGlobal */, 'claude');
+
+    const manifest = JSON.parse(fs.readFileSync(path.join(claudeDir, 'gsd-file-manifest.json'), 'utf8'));
+    const agentKey = Object.keys(manifest.files).find((key) => key.startsWith('gsd-core/agents/'));
+    assert.ok(agentKey, 'precondition: install manifest must own at least one agent corpus file');
+    fs.appendFileSync(path.join(claudeDir, ...agentKey.split('/')), '\n# corrupted after install\n');
+
+    const deployedLayoutPath = path.join(claudeDir, 'gsd-core', 'bin', 'lib', 'runtime-artifact-layout.cjs');
+    delete require.cache[deployedLayoutPath];
+    const deployed = require(deployedLayoutPath);
+
+    assert.throws(
+      () => deployed.findAgentsSourceRoot(claudeDir),
+      /install or upgrade gsd-core/,
+    );
+  });
+
   // ── Adversarial marker-reader cases (no full install needed) ─────────────────
   describe('findInstallSourceRoot marker handling', () => {
     let cfgDir;
