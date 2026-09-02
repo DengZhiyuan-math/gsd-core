@@ -141,12 +141,16 @@ function syncRuntimeSurfaceCorpus(source: string, destination: string, configDir
  * global Runtime Surface after the executing package tree disappears.
  *
  * The corpus deliberately lives below the already-installed `gsd-core/`
- * tree. That placement satisfies runtime-artifact-layout's existing upward
- * source walk, so callers keep one resolver and one transformation pipeline.
+ * tree and is accepted only after its manifest ownership and hashes verify.
+ * The compatibility marker does not replace that installed-corpus authority.
  */
-function provisionRuntimeSurfaceCorpus(layout: any, configDir: string, scope: string): void {
+function provisionRuntimeSurfaceCorpus(
+  layout: { runtime: string; kinds: Iterable<{ kind?: string }> },
+  configDir: string,
+  scope: string,
+): void {
   const required = isGlobalScope(scope as InstallScope)
-    ? runtimeArtifactLayout.requiredRuntimeSurfaceSourceClasses(layout.kinds ?? []) as Set<RuntimeSurfaceSourceClass>
+    ? runtimeArtifactLayout.requiredRuntimeSurfaceSourceClasses(layout.kinds) as Set<RuntimeSurfaceSourceClass>
     : new Set<RuntimeSurfaceSourceClass>();
   if (required.size === 0) return;
 
@@ -177,6 +181,8 @@ function provisionRuntimeSurfaceCorpus(layout: any, configDir: string, scope: st
     }
   }
 }
+
+function executingPackageRoot(): string { return path.dirname(path.dirname(runtimeArtifactLayout.findInstallSourceRoot())); }
 
 // ---------------------------------------------------------------------------
 // USER_OWNED_ARTIFACTS
@@ -1383,7 +1389,7 @@ function installRuntimeArtifacts(
       // Native plugin sources live only in the executing package, never in the
       // durable Runtime Surface corpus. Do not derive this package root from a
       // config-scoped provider that may now correctly resolve installed input.
-      const src = deps.packageRoot ?? path.dirname(path.dirname(runtimeArtifactLayout.findInstallSourceRoot()));
+      const src = deps.packageRoot ?? executingPackageRoot();
       _installNativePluginIfDeclared(runtime, configDir, behaviors, src);
       nativePluginInstalled = true;
     }
@@ -1951,7 +1957,7 @@ function installOpencodeFamilyArtifacts(
   // into stageSkillsForProfile/stageSkillsForRuntimeAsSkills. The repo/package
   // root (needed below for the native plugin source) is two levels up.
   const commandsGsdDir = runtimeArtifactLayout.findInstallSourceRoot(configDir);
-  const src = packageRoot ?? path.dirname(path.dirname(runtimeArtifactLayout.findInstallSourceRoot()));
+  const src = packageRoot ?? executingPackageRoot();
   const rawCommandsDir = installProfiles.stageSkillsForProfile(commandsGsdDir, resolvedProfile);
 
   const pathPrefix = (runtimeArtifactConversion as any)._computePathPrefix({
