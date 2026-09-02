@@ -22,11 +22,6 @@
  * is the minimum-cost contract.
  */
 
-// allow-test-rule: structural-regression-guard
-// structural assertion on spawn-options shape; the behavior
-// (Windows-only shell resolution) is platform-gated at runtime and cannot be
-// reached on POSIX CI without a Windows lane.
-
 'use strict';
 
 const { test, describe } = require('node:test');
