@@ -108,6 +108,11 @@ function pruneEmptyCorpusParents(start: string, stop: string): void {
 }
 
 function syncRuntimeSurfaceCorpus(source: string, destination: string, configDir: string, manifestPrefix: string): void {
+  if (hasExistingSymlinkBetween(path.resolve(configDir), destination, { allowOptInFollow: isSymlinkedDestOptIn() })) {
+    throw new Error(
+      `syncRuntimeSurfaceCorpus: destination "${destination}" contains a symlink the install root "${configDir}" does not trust — refusing to write.`,
+    );
+  }
   assertCorpusTreeHasNoSymlinks(destination);
 
   // Remove only paths the previous manifest proves GSD owned and which the
@@ -149,9 +154,13 @@ function provisionRuntimeSurfaceCorpus(
   configDir: string,
   scope: string,
 ): void {
-  const required = isGlobalScope(scope as InstallScope)
-    ? runtimeArtifactLayout.requiredRuntimeSurfaceSourceClasses(layout.kinds) as Set<RuntimeSurfaceSourceClass>
-    : new Set<RuntimeSurfaceSourceClass>();
+  const required = new Set<RuntimeSurfaceSourceClass>();
+  if (isGlobalScope(scope as InstallScope)) {
+    for (const kind of layout.kinds) {
+      if (kind.kind === 'commands' || kind.kind === 'skills') required.add('commands');
+      if (kind.kind === 'agents' || kind.kind === 'kimi-agents') required.add('agents');
+    }
+  }
   if (required.size === 0) return;
 
   const corpusRoot = path.join(configDir, 'gsd-core');
@@ -161,7 +170,7 @@ function provisionRuntimeSurfaceCorpus(
     syncRuntimeSurfaceCorpus(source, destination, configDir, 'gsd-core/commands/gsd/');
   }
   if (required.has('agents')) {
-    const source = runtimeArtifactLayout.findAgentsSourceRoot();
+    const source = path.join(executingPackageRoot(), 'agents');
     const destination = path.join(corpusRoot, 'agents');
     syncRuntimeSurfaceCorpus(source, destination, configDir, 'gsd-core/agents/');
   }
@@ -169,11 +178,11 @@ function provisionRuntimeSurfaceCorpus(
   const markerFile = _hostBehaviors(layout.runtime).sourceMarkerFile;
   if (typeof markerFile === 'string' && markerFile !== '' && required.has('commands')) {
     try {
-      installFs().writeFileSync(
-        path.join(configDir, markerFile),
-        path.join(corpusRoot, 'commands', 'gsd') + '\n',
-        'utf8',
-      );
+      const markerPath = runtimeArtifactInstallPlan.assertDestWithinConfigHome(configDir, markerFile);
+      if (hasExistingSymlinkBetween(path.resolve(configDir), markerPath, { allowOptInFollow: isSymlinkedDestOptIn() })) {
+        throw new Error(`compatibility marker "${markerPath}" contains an untrusted symlink`);
+      }
+      installFs().writeFileSync(markerPath, path.join(corpusRoot, 'commands', 'gsd') + '\n', 'utf8');
     } catch {
       // The existing installer marker writer owns the user-facing warning and
       // keeps marker failure non-fatal. The installed corpus remains usable
@@ -1630,8 +1639,11 @@ function installAgentsKindStandalone(
   resolveAttribution: ResolveAttribution = () => undefined,
   capabilityRegistry?: any,
 ): { sourceDir: string; destDir: string } | null {
-  const layout: any = runtimeArtifactLayout.resolveRuntimeArtifactLayoutForInstall(runtime, targetDir, scope as 'global' | 'local', capabilityRegistry);
-  const agentsKindEntry = layout.kinds.find((k: any) => k.kind === 'agents');
+  const layout: Pick<
+    ReturnType<typeof runtimeArtifactLayout.resolveRuntimeArtifactLayoutForInstall>,
+    'runtime' | 'kinds'
+  > = runtimeArtifactLayout.resolveRuntimeArtifactLayoutForInstall(runtime, targetDir, scope as 'global' | 'local', capabilityRegistry);
+  const agentsKindEntry = layout.kinds.find((kind) => kind.kind === 'agents');
   if (!agentsKindEntry) return null;
   // #3712: this writer selects `agentsKindEntry.home` over targetDir below and then
   // prunes that destination via _removeGsdEntries, so it is a fifth route into the
@@ -2116,7 +2128,6 @@ function uninstallRuntimeArtifacts(
 
 export = {
   installRuntimeArtifacts,
-  provisionRuntimeSurfaceCorpus,
   uninstallRuntimeArtifacts,
   installOpencodeFamilySkills,
   installOpencodeFamilyCommands,

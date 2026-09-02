@@ -194,6 +194,19 @@ function isReadableDirectory(candidate: string, routed: boolean): boolean {
   }
 }
 
+function isPhysicallyConfinedTo(root: string, candidate: string): boolean {
+  if (process.env.GSD_ALLOW_SYMLINKED_DEST === '1' || process.env.GSD_ALLOW_SYMLINKED_DEST === 'true') {
+    return true;
+  }
+  try {
+    const physicalRoot = installFs().realpathSync(root);
+    const physicalCandidate = installFs().realpathSync(candidate);
+    return physicalCandidate === physicalRoot || physicalCandidate.startsWith(physicalRoot + path.sep);
+  } catch {
+    return false;
+  }
+}
+
 function installedManifestIsComplete(
   runtimeConfigDir: string,
   required: ReadonlySet<RuntimeSurfaceSourceClass>,
@@ -201,6 +214,7 @@ function installedManifestIsComplete(
   const io = installFs();
   const manifestPath = path.join(runtimeConfigDir, 'gsd-file-manifest.json');
   if (!io.existsSync(manifestPath)) return false;
+  if (!isPhysicallyConfinedTo(runtimeConfigDir, manifestPath)) return false;
 
   try {
     const manifest = installerMigrations.readInstallManifest(runtimeConfigDir);
@@ -213,6 +227,28 @@ function installedManifestIsComplete(
     for (const prefix of prefixes) {
       const expected = keys.filter((key) => key.startsWith(prefix));
       if (expected.length === 0) return false;
+      const expectedSet = new Set(expected);
+      const corpusRoot = path.resolve(runtimeConfigDir, ...prefix.slice(0, -1).split('/'));
+      if (!isPhysicallyConfinedTo(runtimeConfigDir, corpusRoot)) return false;
+      let actualFiles = 0;
+      const visit = (dir: string): boolean => {
+        for (const name of io.readdirSync(dir)) {
+          const candidate = path.join(dir, name);
+          const stat = io.lstatSync(candidate);
+          if (stat.isSymbolicLink()) return false;
+          if (stat.isDirectory()) {
+            if (!visit(candidate)) return false;
+          } else if (stat.isFile()) {
+            const relative = path.relative(corpusRoot, candidate).split(path.sep).join('/');
+            if (!expectedSet.has(prefix + relative)) return false;
+            actualFiles += 1;
+          } else {
+            return false;
+          }
+        }
+        return true;
+      };
+      if (!visit(corpusRoot) || actualFiles !== expected.length) return false;
       for (const key of expected) {
         const parts = key.split('/');
         if (parts.some((part) => part === '' || part === '.' || part === '..')) return false;
@@ -371,10 +407,6 @@ function sourceRootFor(context: SourceResolutionContext, sourceClass: RuntimeSur
 
 function findInstallSourceRoot(runtimeConfigDir?: string): string {
   return resolveSourceProvider(runtimeConfigDir, ['commands']).commandsRoot;
-}
-
-function findAgentsSourceRoot(runtimeConfigDir?: string): string {
-  return resolveSourceProvider(runtimeConfigDir, ['agents']).agentsRoot;
 }
 
 // ---------------------------------------------------------------------------
@@ -1304,4 +1336,4 @@ function resolveTriggerSurface(runtime: string, scopes: InstallScope[], opts: Tr
 }
 
 // getInstallExports removed in ADR-1508 / #1511 Phase 2 (last upward .cts→install.js dep).
-export = { resolveRuntimeArtifactLayout, resolveRuntimeArtifactLayoutForInstall, resolveRuntimeArtifactLayoutFromRegistry, requiredRuntimeSurfaceSourceClasses, findInstallSourceRoot, findAgentsSourceRoot, resolveTriggerSurface, isNamespacedByDir, composeCommandFilename };
+export = { resolveRuntimeArtifactLayout, resolveRuntimeArtifactLayoutForInstall, resolveRuntimeArtifactLayoutFromRegistry, findInstallSourceRoot, resolveTriggerSurface, isNamespacedByDir, composeCommandFilename };
