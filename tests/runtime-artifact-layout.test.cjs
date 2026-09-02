@@ -26,6 +26,7 @@ const crypto = require('node:crypto');
 const { resolveRuntimeArtifactLayout, findInstallSourceRoot } = require('../gsd-core/bin/lib/runtime-artifact-layout.cjs');
 const capabilityRegistry = require('../gsd-core/bin/lib/capability-registry.cjs');
 const installProfiles = require('../gsd-core/bin/lib/install-profiles.cjs');
+const { withInstallFs } = require('../gsd-core/bin/lib/install-fs-adapter.cjs');
 const { install } = require('../bin/install.js');
 const { createTempDir, cleanup, scrubConfigLocationEnv, asInstallerLayout } = require('./helpers.cjs');
 
@@ -551,7 +552,7 @@ describe('stage — agents kind (claude local)', () => {
 });
 
 describe('stage — skills kind (claude global)', () => {
-  test('#4132: installer layout freezes executing-package bytes over an old installed corpus', (t) => {
+  test('#4132: an independent source checkout can replace an invalid installed corpus', (t) => {
     const configDir = createTempDir('gsd-4132-installer-source-');
     t.after(() => cleanup(configDir));
     const installedCommands = path.join(configDir, 'gsd-core', 'commands', 'gsd');
@@ -560,8 +561,9 @@ describe('stage — skills kind (claude global)', () => {
     fs.mkdirSync(installedAgents, { recursive: true });
     fs.writeFileSync(path.join(installedCommands, 'help.md'), 'OLD INSTALLED COMMAND\n');
     fs.writeFileSync(path.join(installedAgents, 'gsd-planner.md'), 'OLD INSTALLED AGENT\n');
+    fs.writeFileSync(path.join(configDir, '.gsd-source'), path.join(REPO_ROOT, 'commands', 'gsd') + '\n');
 
-    const layout = resolveRuntimeArtifactLayoutForInstall('claude', configDir, 'global');
+    const layout = resolveRuntimeArtifactLayout('claude', configDir, 'global');
     const skillsKind = layout.kinds.find(k => k.kind === 'skills');
     const agentsKind = layout.kinds.find(k => k.kind === 'agents');
     assert.ok(skillsKind);
@@ -1164,6 +1166,21 @@ describe('#1477 .gsd-source marker provisioning', () => {
       assert.ok(skills);
       assert.throws(
         () => skills.stage(PROFILE_CORE),
+        /install or upgrade gsd-core/,
+      );
+    });
+
+    test('#4132: caller-supplied stage context cannot select installer source authority', () => {
+      const layout = resolveRuntimeArtifactLayout('claude', cfgDir, 'global');
+      const skills = layout.kinds.find((kind) => kind.kind === 'skills');
+      assert.throws(
+        () => skills.stage(PROFILE_CORE, {
+          [Symbol.for('@open-gsd/runtime-artifact-installer-source-authority')]: true,
+        }),
+        /install or upgrade gsd-core/,
+      );
+      assert.throws(
+        () => withInstallFs(undefined, () => skills.stage(PROFILE_CORE)),
         /install or upgrade gsd-core/,
       );
     });

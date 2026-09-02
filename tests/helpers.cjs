@@ -1112,14 +1112,32 @@ function sandboxHome(t, dir) {
 }
 
 function asInstallerLayout(layout) {
+  const { findInstallSourceRoot } = require('../gsd-core/bin/lib/runtime-artifact-layout.cjs');
+  if (layout.scope !== 'global') return layout;
+  const markerPath = path.join(layout.configDir, '.gsd-source');
   return {
     ...layout,
     kinds: layout.kinds.map((kind) => ({
       ...kind,
-      stage: (profile, context) => kind.stage(profile, {
-        ...context,
-        [Symbol.for('@open-gsd/runtime-artifact-installer-source-authority')]: true,
-      }),
+      stage: (profile, context) => {
+        try {
+          return kind.stage(profile, context);
+        } catch (error) {
+          if (!String(error?.message).startsWith('Runtime Surface source is unavailable or incomplete for ')) {
+            throw error;
+          }
+        }
+        fs.mkdirSync(layout.configDir, { recursive: true });
+        const markerExisted = fs.existsSync(markerPath);
+        const previousMarker = markerExisted ? fs.readFileSync(markerPath) : null;
+        fs.writeFileSync(markerPath, findInstallSourceRoot() + '\n');
+        try {
+          return kind.stage(profile, context);
+        } finally {
+          if (previousMarker !== null) fs.writeFileSync(markerPath, previousMarker);
+          else fs.unlinkSync(markerPath);
+        }
+      },
     })),
   };
 }

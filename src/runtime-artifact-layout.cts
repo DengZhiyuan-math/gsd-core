@@ -95,9 +95,9 @@ interface CapabilityRegistryForSkills {
 }
 
 /**
- * Cross-cutting context for descriptor-driven staging. Installer plans brand
- * this context internally for every kind; agent kinds additionally use these
- * fields for the exact pathRewrites → attribution → converter → normalize order.
+ * Cross-cutting context for descriptor-driven agent staging (ADR-1235 §1).
+ * Agent kinds use these fields for the exact pathRewrites → attribution →
+ * converter → normalize order.
  */
 interface AgentCtx {
   runtime: string;
@@ -114,8 +114,8 @@ interface ArtifactKind {
   kind: KimiArtifactKindName;
   destSubpath: string;
   prefix: string;
-  /** Accepts optional staging context for installer source authority and agent
-   *  pre-converter cross-cutting (ADR-1235 §1). */
+  /** For agent kinds, accepts optional pre-converter cross-cutting context
+   *  (ADR-1235 §1). */
   stage: (resolvedProfile: ResolvedProfile, agentCtx?: AgentCtx) => string;
   /** Resolved absolute alternate install root for this kind, if the descriptor
    *  specifies one (e.g. codex skills → $HOME/.agents). Undefined means the
@@ -130,7 +130,6 @@ interface ArtifactKind {
 }
 
 type RuntimeSurfaceSourceClass = 'commands' | 'agents';
-const INSTALLER_SOURCE_AUTHORITY = Symbol.for('@open-gsd/runtime-artifact-installer-source-authority');
 
 interface RuntimeSurfaceSourceProvider {
   kind: 'installed' | 'marker' | 'package';
@@ -142,7 +141,7 @@ interface SourceResolutionContext {
   runtimeConfigDir: string;
   scope: 'local' | 'global';
   required: Set<RuntimeSurfaceSourceClass>;
-  authority: 'installer' | 'runtime' | 'compatible';
+  authority: 'runtime' | 'compatible';
   provider?: RuntimeSurfaceSourceProvider;
 }
 
@@ -303,6 +302,13 @@ function markerProvider(runtimeConfigDir: string): RuntimeSurfaceSourceProvider 
     if (!markerStat.isFile() || markerStat.isSymbolicLink()) return null;
     const commandsRoot = installFs().readFileSync(markerPath, 'utf8').trim();
     if (!commandsRoot) return null;
+    // A marker written by the installer may point at this process's executing
+    // package. Preserve package-source IO on real fs so the existing injected
+    // destination adapter remains destination-only (#2874).
+    const packaged = packageProvider(new Set(['commands']));
+    if (packaged && path.resolve(commandsRoot) === path.resolve(packaged.commandsRoot)) {
+      return packaged;
+    }
     return {
       kind: 'marker',
       commandsRoot,
@@ -340,24 +346,12 @@ function resolveSourceProvider(
   runtimeConfigDir: string | undefined,
   requiredClasses: Iterable<RuntimeSurfaceSourceClass>,
   scope: 'local' | 'global' = 'global',
-  authority: 'installer' | 'runtime' | 'compatible' = 'compatible',
+  authority: 'runtime' | 'compatible' = 'compatible',
 ): RuntimeSurfaceSourceProvider {
   const required = new Set(requiredClasses);
   let rejectedInstalled: RuntimeSurfaceSourceProvider | null = null;
   if (required.size === 0) {
     return { kind: 'package', commandsRoot: '', agentsRoot: '' };
-  }
-
-  if (authority === 'installer') {
-    if (runtimeConfigDir) {
-      const marker = markerProvider(runtimeConfigDir);
-      if (marker && providerHasRequiredClasses(marker, required, true)) return marker;
-    }
-    const packaged = packageProvider(required);
-    if (packaged) return packaged;
-    throw new Error(
-      `Executing package source is unavailable or incomplete for ${[...required].sort().join('+')}.`,
-    );
   }
 
   if (runtimeConfigDir && scope === 'global') {
@@ -370,12 +364,12 @@ function resolveSourceProvider(
     rejectedInstalled = installed;
 
     const marker = markerProvider(runtimeConfigDir);
-    if (marker && !providersShareRequiredRoots(marker, installed, required) && providerHasRequiredClasses(marker, required, true)) {
+    if (marker && !providersShareRequiredRoots(marker, installed, required) && providerHasRequiredClasses(marker, required, marker.kind !== 'package')) {
       return marker;
     }
   } else if (runtimeConfigDir) {
     const marker = markerProvider(runtimeConfigDir);
-    if (marker && providerHasRequiredClasses(marker, required, true)) return marker;
+    if (marker && providerHasRequiredClasses(marker, required, marker.kind !== 'package')) return marker;
   }
 
   if (authority === 'compatible') {
@@ -397,17 +391,12 @@ function resolveSourceProvider(
 function sourceRootFor(
   context: SourceResolutionContext,
   sourceClass: RuntimeSurfaceSourceClass,
-  stageContext?: AgentCtx,
 ): string {
-  const authority = stageContext &&
-    (stageContext as unknown as Record<symbol, unknown>)[INSTALLER_SOURCE_AUTHORITY] === true
-    ? 'installer'
-    : context.authority;
   context.provider ??= resolveSourceProvider(
     context.runtimeConfigDir,
     context.required,
     context.scope,
-    authority,
+    context.authority,
   );
   return sourceClass === 'commands' ? context.provider.commandsRoot : context.provider.agentsRoot;
 }
@@ -425,7 +414,7 @@ function commandsKind(destSubpath: string, prefix: string, sourceContext: Source
     kind: 'commands',
     destSubpath,
     prefix,
-    stage: (resolved, stageContext) => stageSkillsForProfile(sourceRootFor(sourceContext, 'commands', stageContext), resolved),
+    stage: (resolved) => stageSkillsForProfile(sourceRootFor(sourceContext, 'commands'), resolved),
   };
 }
 
@@ -453,7 +442,7 @@ function agentsKind(destSubpath: string, prefix: string, configDir: string, sour
     // a caller with NO agentCtx in scope is unaffected (row I2: converter-only,
     // as today), matching stageAgentsForRuntimeWithConverter's own contract.
     stage: (resolved, agentCtx) => stageAgentsForRuntimeWithConverter(
-      sourceRootFor(sourceContext, 'agents', agentCtx),
+      sourceRootFor(sourceContext, 'agents'),
       resolved,
       (content: string) => content,
       false,
@@ -675,7 +664,7 @@ function convertedAgentsKind(
       // for descriptor-driven runtimes), thread it through so stageAgentsForRuntimeWithConverter
       // can apply the full pre-converter + post-converter sequence in the correct order.
       return stageAgentsForRuntimeWithConverter(
-        sourceRootFor(sourceContext, 'agents', agentCtx),
+        sourceRootFor(sourceContext, 'agents'),
         resolved,
         converter,
         isGlobalScope(scope),
@@ -690,7 +679,7 @@ function kimiAgentsKind(destSubpath: string, prefix: string, configDir: string, 
     kind: 'kimi-agents',
     destSubpath,
     prefix,
-    stage: (resolved, stageContext) => {
+    stage: (resolved) => {
       const buildKimiAgentArtifacts = conversionExports['buildKimiAgentArtifacts'] as (opts: {
         rootAgent?: string;
         subagents?: Array<{ path: string; content: string }>;
@@ -701,7 +690,7 @@ function kimiAgentsKind(destSubpath: string, prefix: string, configDir: string, 
       // #2995: compose at staging (identity converter) so the readFileSync below
       // sees marker-free content — same single composing stager as agentsKind.
       const stagedAgents = stageAgentsForRuntimeWithConverter(
-        sourceRootFor(sourceContext, 'agents', stageContext),
+        sourceRootFor(sourceContext, 'agents'),
         resolved,
         (content: string) => content,
       );
@@ -768,7 +757,7 @@ function skillsKind(
     destSubpath,
     prefix,
     converter: converterName,
-    stage: (resolved, stageContext) => {
+    stage: (resolved) => {
       const realConverter = _resolveNamedConverter(converterName, 'skills') as (content: string, skillName: string, runtime: string, cmdNames: string[], isGlobal: boolean) => string;
       // Compute cmdNames once per stage call for performance (#3583).
       // Extra trailing args are ignored by converters that don't need them. The
@@ -796,7 +785,7 @@ function skillsKind(
       // rewritten shape.
       const wrappedConverter = (content: string, skillName: string): string =>
         realConverter(content, skillName, runtime, cmdNames, isGlobal);
-      return stageSkillsForRuntimeAsSkills(sourceRootFor(sourceContext, 'commands', stageContext), resolved, wrappedConverter, prefix, nested, capabilityRegistry);
+      return stageSkillsForRuntimeAsSkills(sourceRootFor(sourceContext, 'commands'), resolved, wrappedConverter, prefix, nested, capabilityRegistry);
     },
   };
 }
@@ -827,9 +816,9 @@ function convertedCommandsKind(
     kind: 'commands',
     destSubpath,
     prefix,
-    stage: (resolved, stageContext) => {
+    stage: (resolved) => {
       const converter = _resolveNamedConverter(converterName, 'commands') as (content: string, commandName: string) => string;
-      return stageCommandsForRuntimeFlat(sourceRootFor(sourceContext, 'commands', stageContext), resolved, converter, prefix);
+      return stageCommandsForRuntimeFlat(sourceRootFor(sourceContext, 'commands'), resolved, converter, prefix);
     },
   };
 }

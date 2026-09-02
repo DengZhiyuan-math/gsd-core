@@ -70,6 +70,40 @@ type ResolveAttribution = (runtime: string) => any;
 
 type RuntimeSurfaceSourceClass = 'commands' | 'agents';
 
+function withInstallerPackageSource<T>(
+  configDir: string,
+  fn: () => T,
+): T {
+  // Reuse the existing compatibility-marker contract through the existing fs
+  // seam. The marker exists only in this synchronous call tree: no disk state,
+  // layout export, stage argument, or caller-settable authority flag is added.
+  const markerPath = path.resolve(configDir, '.gsd-source');
+  const packageCommandsRoot = runtimeArtifactLayout.findInstallSourceRoot();
+  const markerBytes = Buffer.from(packageCommandsRoot + '\n');
+  const base = installFs();
+  const overlay = {
+    ...base,
+    existsSync: (candidate: string): boolean =>
+      path.resolve(candidate) === markerPath || base.existsSync(candidate),
+    lstatSync: (candidate: string): ReturnType<typeof base.lstatSync> =>
+      path.resolve(candidate) === markerPath
+        ? { isFile: () => true, isDirectory: () => false, isSymbolicLink: () => false }
+        : base.lstatSync(candidate),
+    readFileSync: ((candidate: string, encoding?: BufferEncoding): string | Buffer => {
+      if (path.resolve(candidate) !== markerPath) {
+        return encoding ? base.readFileSync(candidate, encoding) : base.readFileSync(candidate);
+      }
+      return encoding ? markerBytes.toString(encoding) : Buffer.from(markerBytes);
+    }) as typeof base.readFileSync,
+  };
+  return withInstallFs(overlay, fn);
+}
+
+function isRuntimeSurfaceSourceUnavailable(message: string): boolean {
+  return message.startsWith('Runtime Surface source is unavailable or incomplete for ') &&
+    message.endsWith('install or upgrade gsd-core before materializing this surface.');
+}
+
 function assertCorpusTreeHasNoSymlinks(root: string): void {
   if (!installFs().existsSync(root)) return;
   const stat = installFs().lstatSync(root);
@@ -1220,7 +1254,7 @@ function installRuntimeArtifacts(
     testHomeGuard.assertTestHomeSandboxed('installRuntimeArtifacts', runtime, layout?.kinds, {
       os: deps.os, env: deps.env,
     });
-    const planResult = runtimeArtifactInstallPlan.createRuntimeArtifactInstallPlan({
+    const createPlan = () => runtimeArtifactInstallPlan.createRuntimeArtifactInstallPlan({
       // `Layout` is structurally identical across the layout/install-plan .cjs
       // modules but nominally distinct to tsc (untyped .cjs boundary) — bridge it.
       layout: layout as any,
@@ -1229,6 +1263,16 @@ function installRuntimeArtifacts(
       platform: process.platform,
       resolveAttribution,
     });
+    let planResult = createPlan();
+    if (
+      scope === 'global' &&
+      !planResult.ok &&
+      planResult.kind === 'stage_failed' &&
+      planResult.cleanupDirs.length === 0 &&
+      isRuntimeSurfaceSourceUnavailable(planResult.message)
+    ) {
+      planResult = withInstallerPackageSource(configDir, createPlan);
+    }
 
     const cleanupDirs = planResult.ok ? planResult.plan.cleanupDirs : planResult.cleanupDirs;
     // #2874 row 1/4/5: per-kind executed-plan entries, appended only as the
@@ -1659,10 +1703,13 @@ function installAgentsKindStandalone(
   // targetDir IS the install root the inline agent loop called `targetDir`.
   const attribution = resolveAttribution ? resolveAttribution(runtime) : undefined;
   const agentCtx = { runtime, pathPrefix, attribution, targetDir };
-  const stagedDir: string = agentsKindEntry.stage(resolvedProfile, {
-    ...agentCtx,
-    [Symbol.for('@open-gsd/runtime-artifact-installer-source-authority')]: true,
-  });
+  let stagedDir: string;
+  try {
+    stagedDir = agentsKindEntry.stage(resolvedProfile, agentCtx);
+  } catch (err) {
+    if (scope !== 'global' || !isRuntimeSurfaceSourceUnavailable((err as Error).message)) throw err;
+    stagedDir = withInstallerPackageSource(targetDir, () => agentsKindEntry.stage(resolvedProfile, agentCtx));
+  }
 
   const stagedAgentFiles: string[] = installFs().existsSync(stagedDir)
     ? installFs().readdirSync(stagedDir).filter((f: string) => f.endsWith('.md'))
