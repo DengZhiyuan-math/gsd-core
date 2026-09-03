@@ -1008,16 +1008,6 @@ function resolveRuntimeArtifactLayoutFromRegistry(
   scope: 'local' | 'global' = 'global',
   capabilityRegistry?: CapabilityRegistryForSkills,
 ): Layout {
-  return resolveRuntimeArtifactLayoutInternal(registry, runtime, configDir, scope, capabilityRegistry);
-}
-
-function resolveRuntimeArtifactLayoutInternal(
-  registry: RegistryLike,
-  runtime: string,
-  configDir: string,
-  scope: 'local' | 'global',
-  capabilityRegistry: CapabilityRegistryForSkills | undefined,
-): Layout {
   if (typeof configDir !== 'string' || configDir === '') {
     throw new TypeError('configDir must be a non-empty string');
   }
@@ -1032,18 +1022,12 @@ function resolveRuntimeArtifactLayoutInternal(
 
   const entries: ArtifactKindDescriptor[] = desc[scope] ?? [];
   const required = requiredRuntimeSurfaceSourceClasses(entries);
-  // Installer layouts freeze one complete provider: a compatibility marker
-  // when explicitly configured, otherwise the executing package. Installers
-  // may provision the durable installed corpus between layout resolution and
-  // stage(), and
-  // that write must not silently change which version this already-resolved
-  // plan reads. This also preserves the legacy .gsd-source contract for
-  // callers that deliberately supplied a complete marker before resolving.
-  // Ordinary global runtime-surface layouts never fall back to the executing
-  // package: they require the installation-owned corpus or a complete
-  // compatibility marker and therefore fail closed for a source-less legacy
-  // install. Local layouts retain their established package/upward source;
-  // local installs intentionally own neither the global corpus nor a marker.
+  // Stage closures share one lazy source-resolution context, so the first kind
+  // to stage selects and caches one complete provider for every required source
+  // class. Global layouts accept only installed or marker providers; the
+  // installer owns its private package fallback by retrying through a transient
+  // compatibility marker after source resolution fails. Local layouts retain
+  // compatible marker/package resolution and never provision the global corpus.
   const sourceContext: SourceResolutionContext = {
     runtimeConfigDir: configDir,
     scope,
