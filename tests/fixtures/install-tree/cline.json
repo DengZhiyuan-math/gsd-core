@@ -134,6 +134,7 @@
   "gsd-core/commands/gsd/pr-branch.md",
   "gsd-core/commands/gsd/profile-user.md",
   "gsd-core/commands/gsd/progress.md",
+  "gsd-core/commands/gsd/quick-batch.md",
   "gsd-core/commands/gsd/quick.md",
   "gsd-core/commands/gsd/resume-work.md",
   "gsd-core/commands/gsd/review-backlog.md",
