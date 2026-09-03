@@ -39,6 +39,7 @@ const {
 } = require('../gsd-core/bin/lib/install-fs-adapter.cjs');
 const {
   findInstallSourceRoot,
+  resolveRuntimeArtifactLayout,
 } = require('../gsd-core/bin/lib/runtime-artifact-layout.cjs');
 const {
   stageSkillsForRuntimeAsSkills,
@@ -159,6 +160,77 @@ describe('command-roster readGsdCommandNames — package-source read stays unrou
 });
 
 describe('runtime artifact source identity — destination probes stay routed', () => {
+  test('#4132: installed provider admission streams hashes before reading corpus content', (t) => {
+    const configDir = createTempDir('gsd-installed-provider-');
+    t.after(() => cleanup(configDir));
+    const installedCommands = path.join(configDir, 'gsd-core', 'commands', 'gsd');
+    const installedAgents = path.join(configDir, 'gsd-core', 'agents');
+    const commandPath = path.join(installedCommands, 'help.md');
+    const agentPath = path.join(installedAgents, 'gsd-planner.md');
+    const manifestPath = path.join(configDir, 'gsd-file-manifest.json');
+    fs.mkdirSync(installedCommands, { recursive: true });
+    fs.mkdirSync(installedAgents, { recursive: true });
+    fs.writeFileSync(commandPath, '# installed command\n');
+    fs.writeFileSync(agentPath, '# installed agent\n');
+    fs.writeFileSync(manifestPath, JSON.stringify({ files: {
+      'gsd-core/commands/gsd/help.md': crypto.createHash('sha256').update(fs.readFileSync(commandPath)).digest('hex'),
+      'gsd-core/agents/gsd-planner.md': crypto.createHash('sha256').update(fs.readFileSync(agentPath)).digest('hex'),
+    } }));
+
+    const corpusPaths = new Set([commandPath, agentPath].map((candidate) => path.resolve(candidate)));
+    const hashingDescriptors = new Map();
+    const streamedHashes = new Set();
+    const hashedBeforeRead = new Set();
+    const corpusReadsBeforeHash = [];
+    const readCalls = [];
+    const recordingFs = {
+      ...fs,
+      readFileSync: (candidate, ...args) => {
+        const resolved = path.resolve(String(candidate));
+        readCalls.push(resolved);
+        if (corpusPaths.has(resolved) && !hashedBeforeRead.has(resolved)) {
+          corpusReadsBeforeHash.push(resolved);
+        }
+        return fs.readFileSync(candidate, ...args);
+      },
+      openSync: (candidate, ...args) => {
+        const fd = fs.openSync(candidate, ...args);
+        const resolved = path.resolve(String(candidate));
+        if (corpusPaths.has(resolved)) hashingDescriptors.set(fd, resolved);
+        return fd;
+      },
+      readSync: (fd, ...args) => {
+        const resolved = hashingDescriptors.get(fd);
+        if (resolved) streamedHashes.add(resolved);
+        return fs.readSync(fd, ...args);
+      },
+      closeSync: (fd) => {
+        fs.closeSync(fd);
+        const resolved = hashingDescriptors.get(fd);
+        if (resolved) hashedBeforeRead.add(resolved);
+      },
+    };
+
+    const layout = resolveRuntimeArtifactLayout('claude', configDir, 'global');
+    let stagedSkills;
+    let stagedAgents;
+    t.after(() => {
+      if (stagedSkills) cleanup(stagedSkills);
+      if (stagedAgents) cleanup(stagedAgents);
+    });
+    withInstallFs(recordingFs, () => {
+      stagedSkills = layout.kinds.find((kind) => kind.kind === 'skills').stage({ skills: '*', agents: '*' });
+      stagedAgents = layout.kinds.find((kind) => kind.kind === 'agents').stage({ skills: '*', agents: '*' });
+    });
+
+    assert.deepStrictEqual(corpusReadsBeforeHash, [], 'installed corpus files must not be pre-read before manifest hashing');
+    assert.deepStrictEqual(streamedHashes, corpusPaths, 'commands and agents hashes must stream through readSync');
+    assert.deepStrictEqual(hashedBeforeRead, corpusPaths, 'commands and agents hashes must use the streaming fd path');
+    assert.ok(readCalls.includes(path.resolve(manifestPath)), 'provider admission must still read the install manifest');
+    assert.match(fs.readFileSync(path.join(stagedSkills, 'gsd-help', 'SKILL.md'), 'utf8'), /installed command/);
+    assert.match(fs.readFileSync(path.join(stagedAgents, 'gsd-planner.md'), 'utf8'), /installed agent/);
+  });
+
   test('#4132: an installed-root alias is resolved through installFs without routing the package root', () => {
     const configDir = path.join(os.tmpdir(), `gsd-fake-config-${crypto.randomUUID()}`);
     const installedCommands = path.join(configDir, 'gsd-core', 'commands', 'gsd');

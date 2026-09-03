@@ -117,11 +117,9 @@ function assertCorpusTreeHasNoSymlinks(root: string): void {
 }
 
 function previousOwnedCorpusFiles(configDir: string, prefix: string): string[] {
-  const manifestPath = path.join(configDir, 'gsd-file-manifest.json');
   try {
-    const parsed = JSON.parse(installFs().readFileSync(manifestPath, 'utf8'));
-    if (!parsed || typeof parsed.files !== 'object' || parsed.files === null) return [];
-    return Object.keys(parsed.files)
+    const files = installerMigrations.readInstallManifest(configDir).files;
+    return Object.keys(files)
       .filter((entry) => entry.startsWith(prefix))
       .map((entry) => entry.slice(prefix.length))
       .filter((entry) => entry !== '' && !path.posix.isAbsolute(entry) && !entry.split('/').some((part) => part === '' || part === '.' || part === '..'));

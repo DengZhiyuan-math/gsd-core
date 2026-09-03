@@ -273,10 +273,11 @@ function providerHasRequiredClasses(
   routed: boolean,
   runtimeConfigDir?: string,
 ): boolean {
-  const readable = (!required.has('commands') || isReadableDirectory(provider.commandsRoot, routed)) &&
+  if (provider.kind === 'installed' && runtimeConfigDir) {
+    return installedManifestIsComplete(runtimeConfigDir, required);
+  }
+  return (!required.has('commands') || isReadableDirectory(provider.commandsRoot, routed)) &&
     (!required.has('agents') || isReadableDirectory(provider.agentsRoot, routed));
-  if (!readable) return false;
-  return provider.kind !== 'installed' || !runtimeConfigDir || installedManifestIsComplete(runtimeConfigDir, required);
 }
 
 function providersShareRequiredRoots(
