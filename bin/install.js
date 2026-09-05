@@ -1821,8 +1821,20 @@ const kiloAgentPermissionOrder = [
   'lsp',
 ];
 
+const kiloMcpPermissionPattern = /^mcp__([A-Za-z0-9_-]+)__((?:[A-Za-z0-9_-]+)|\*)$/;
+
+// Derives Kilo's native `{server}_{tool}` MCP permission key (kilo.ai/docs —
+// external, fixed format). Not injective: both capture groups allow `_`, so
+// e.g. `mcp__a_b__c` and `mcp__a__b_c` derive the same key. The `Set` below
+// resolves any such collision deterministically to first-seen-wins — see
+// src/runtime-artifact-conversion.cts's regression test. Mirrors that file's
+// convertClaudeToKiloPermissionTool exactly (#4032).
 function convertClaudeToKiloPermissionTool(claudeTool) {
-  return claudeToKiloAgentPermissions[claudeTool] || null;
+  const builtinPermission = claudeToKiloAgentPermissions[claudeTool];
+  if (builtinPermission) return builtinPermission;
+
+  const mcpPermission = kiloMcpPermissionPattern.exec(claudeTool);
+  return mcpPermission ? `${mcpPermission[1]}_${mcpPermission[2]}` : null;
 }
 
 function buildKiloAgentPermissionBlock(claudeTools) {
@@ -1838,6 +1850,10 @@ function buildKiloAgentPermissionBlock(claudeTools) {
   const lines = ['permission:'];
   for (const permission of kiloAgentPermissionOrder) {
     lines.push(`  ${permission}: ${allowedPermissions.has(permission) ? 'allow' : 'deny'}`);
+  }
+  for (const permission of allowedPermissions) {
+    if (kiloAgentPermissionOrder.includes(permission)) continue;
+    lines.push(`  ${permission}: allow`);
   }
 
   return lines;
@@ -7397,7 +7413,8 @@ function convertClaudeToKiloFrontmatter(content, { isAgent = false, modelOverrid
 
     if (isAgent && inAgentTools) {
       if (trimmed.startsWith('- ')) {
-        agentTools.push(trimmed.substring(2).trim());
+        const tool = runtimeArtifactConversion._decodeToolScalar(trimmed.substring(2));
+        if (tool !== null) agentTools.push(tool);
         continue;
       }
       if (trimmed && !trimmed.startsWith('-')) {
@@ -7409,8 +7426,12 @@ function convertClaudeToKiloFrontmatter(content, { isAgent = false, modelOverrid
     if (trimmed.startsWith('tools:')) {
       if (isAgent) {
         const toolsValue = trimmed.substring(6).trim();
-        if (toolsValue) {
-          const tools = toolsValue.split(',').map(t => t.trim()).filter(t => t);
+        // A comment-only value (`tools: # note`) is not real inline content —
+        // fall through to the block-list scan instead of decoding the
+        // comment as a bogus tool name and dropping the list (mirrors
+        // src/runtime-artifact-conversion.cts's convertClaudeToKiloFrontmatter, #4032).
+        if (toolsValue && !toolsValue.startsWith('#')) {
+          const tools = runtimeArtifactConversion._splitToolScalars(toolsValue).map(runtimeArtifactConversion._decodeToolScalar).filter(tool => tool !== null);
           agentTools.push(...tools);
         } else {
           inAgentTools = true;
@@ -7476,7 +7497,8 @@ function convertClaudeToKiloFrontmatter(content, { isAgent = false, modelOverrid
       if (trimmed.startsWith('- ')) {
         const tool = trimmed.substring(2).trim();
         if (isAgent) {
-          agentTools.push(tool);
+          const decoded = runtimeArtifactConversion._decodeToolScalar(tool);
+          if (decoded !== null) agentTools.push(decoded);
         } else {
           allowedTools.push(tool);
         }
@@ -11351,7 +11373,8 @@ function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
   } else if (_isSkillsRuntime) {
     console.log(`  ${dim}↳${reset} Agents installed via descriptor-driven layout (${runtime})`);
   } else {
-    const _standaloneAgentsResult = installAgentsKindStandalone(runtime, targetDir, _installScopeId, _resolvedProfile, pathPrefix, getCommitAttribution, _installedCapabilityRegistry);
+    const _standaloneProjectDir = isGlobal ? process.cwd() : targetDir;
+    const _standaloneAgentsResult = installAgentsKindStandalone(runtime, targetDir, _installScopeId, _resolvedProfile, pathPrefix, getCommitAttribution, _installedCapabilityRegistry, _standaloneProjectDir);
     if (_standaloneAgentsResult) {
       // #2875 defect fix: installAgentsKindStandalone now returns `null`
       // (rather than a truthy result pointing at an empty destDir) whenever a
