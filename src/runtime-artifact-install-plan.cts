@@ -36,6 +36,8 @@ interface AgentCtx {
    *  resolution can read config exactly as the inline agent loop's own
    *  `targetDir` variable did. */
   targetDir?: string | null;
+  /** Project/config discovery root, distinct from global artifact destinations. */
+  projectDir?: string | null;
 }
 
 interface ArtifactKind {
@@ -114,6 +116,7 @@ interface CreateRuntimeArtifactInstallPlanArgs {
   homedir?: () => string;
   platform?: NodeJS.Platform;
   resolveAttribution?: (runtime: string) => string | null | undefined;
+  projectDir?: string | null;
   deps?: Dependencies;
 }
 
@@ -164,6 +167,7 @@ function createRuntimeArtifactInstallPlan(args: CreateRuntimeArtifactInstallPlan
     homedir,
     platform,
     resolveAttribution,
+    projectDir,
     deps = {},
   } = args;
   const conversionExports = _require('./runtime-artifact-conversion.cjs') as RuntimeArtifactConversionExports;
@@ -207,6 +211,7 @@ function createRuntimeArtifactInstallPlan(args: CreateRuntimeArtifactInstallPlan
     pathPrefix,
     attribution,
     targetDir: layout.configDir,
+    projectDir: projectDir ?? layout.configDir,
   };
   for (const kind of layout.kinds) {
     let stagedDir: string;
@@ -227,7 +232,7 @@ function createRuntimeArtifactInstallPlan(args: CreateRuntimeArtifactInstallPlan
         const rewrittenDir = rewriteStagedSkillBodies(stagedDir, rewriteOpts);
         sourceDir = addCleanupDir(cleanupDirs, stagedDir, rewrittenDir);
       }
-      // agents kind: cross-cutting already applied INSIDE kind.stage() via agentCtx.
+      // Agent kinds: cross-cutting already applied INSIDE kind.stage() via agentCtx.
       // No POST-step needed. sourceDir stays as stagedDir.
     } catch (err) {
       return { ok: false, kind: 'rewrite_failed', message: errorMessage(err), cleanupDirs, failedKind: kind.kind };

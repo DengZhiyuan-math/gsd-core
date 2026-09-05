@@ -108,6 +108,8 @@ interface AgentCtx {
    *  per-agent model-override resolution below. Mirrors install-profiles.cts's
    *  identically-named AgentCtx field — see its doc comment. */
   targetDir?: string | null;
+  /** Project/config discovery root, distinct from global artifact destinations. */
+  projectDir?: string | null;
 }
 
 interface ArtifactKind {
@@ -702,7 +704,7 @@ function kimiAgentsKind(destSubpath: string, prefix: string, configDir: string, 
     kind: 'kimi-agents',
     destSubpath,
     prefix,
-    stage: (resolved) => {
+    stage: (resolved, agentCtx) => {
       const buildKimiAgentArtifacts = conversionExports['buildKimiAgentArtifacts'] as (opts: {
         rootAgent?: string;
         subagents?: Array<{ path: string; content: string }>;
@@ -716,6 +718,8 @@ function kimiAgentsKind(destSubpath: string, prefix: string, configDir: string, 
         sourceRootFor(sourceContext, 'agents'),
         resolved,
         (content: string) => content,
+        false,
+        agentCtx,
       );
       const subagents: Array<{ path: string; content: string }> = [];
       if (installFs().existsSync(stagedAgents)) {

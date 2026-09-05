@@ -1218,6 +1218,7 @@ function installRuntimeArtifacts(
     // generic layout-driven loop below, mirroring the bespoke install path that
     // previously lived inline in bin/install.js.
     const behaviors = _hostBehaviors(runtime);
+    const projectDir = scope === 'global' ? process.cwd() : configDir;
     if (behaviors.combinedFamilyInstall) {
       // #2329: combined-family runtimes (OpenCode/Kilo) bypass
       // _runLegacyInstallMigrations below entirely (early return), so their
@@ -1240,6 +1241,7 @@ function installRuntimeArtifacts(
         behaviors,
         capabilityRegistry,
         deps.packageRoot,
+        projectDir,
       );
     }
 
@@ -1260,6 +1262,7 @@ function installRuntimeArtifacts(
       homedir: () => os.homedir(),
       platform: process.platform,
       resolveAttribution,
+      projectDir,
     });
     let planResult = createPlan();
     if (
@@ -1669,6 +1672,7 @@ function installOpencodeFamilySkills(
  * @param capabilityRegistry - #2362: optional composed capability registry, threaded
  *   straight through to resolveRuntimeArtifactLayout (unused by the agents kind today,
  *   but kept for signature parity with the skills/commands siblings on this call tree)
+ * @param projectDir - project/config discovery root, distinct from the artifact destination
  * @returns `{ sourceDir, destDir }` describing what was written, or `null` when the
  *   runtime's layout declares no `agents` kind.
  */
@@ -1680,6 +1684,7 @@ function installAgentsKindStandalone(
   pathPrefix: string,
   resolveAttribution: ResolveAttribution = () => undefined,
   capabilityRegistry?: any,
+  projectDir?: string | null,
 ): { sourceDir: string; destDir: string } | null {
   const layout: Pick<
     ReturnType<typeof runtimeArtifactLayout.resolveRuntimeArtifactLayout>,
@@ -1700,7 +1705,7 @@ function installAgentsKindStandalone(
   // for the generic layout-driven loop (runtime-artifact-install-plan.cts) —
   // targetDir IS the install root the inline agent loop called `targetDir`.
   const attribution = resolveAttribution ? resolveAttribution(runtime) : undefined;
-  const agentCtx = { runtime, pathPrefix, attribution, targetDir };
+  const agentCtx = { runtime, pathPrefix, attribution, targetDir, projectDir: projectDir ?? targetDir };
   let stagedDir: string;
   try {
     stagedDir = agentsKindEntry.stage(resolvedProfile, agentCtx);
@@ -1990,6 +1995,7 @@ function _migrateLegacyOpencodeCommandDir(runtime: string, configDir: string, be
  *   installOpencodeFamilySkills so an installed third-party capability skill
  *   materializes for this combined-family (OpenCode/Kilo) install path too.
  *   Absent -> no third-party skills staged (fail closed).
+ * @param projectDir - project/config discovery root, distinct from configDir for global installs
  * @returns #2874 design row 2: an executed-plan value, same top-level shape
  *   (`runtime`/`scope`/`kinds`/`cleanup`/`postSteps`) as the generic
  *   `installRuntimeArtifacts` branch — this was the one early return a
@@ -2004,6 +2010,7 @@ function installOpencodeFamilyArtifacts(
   behaviors: any = {},
   capabilityRegistry?: any,
   packageRoot?: string,
+  projectDir?: string | null,
 ): any {
   // #2870: `scope` keeps its exported required `string` signature (no
   // signature change). It is always the `installRuntimeArtifacts`-forwarded
@@ -2045,7 +2052,7 @@ function installOpencodeFamilyArtifacts(
   // generic layout-driven loop uses (see installAgentsKindStandalone's own
   // doc). A `null` result means this runtime's layout declares no `agents`
   // kind — nothing written, nothing reported (no #1879-F15 inert claim).
-  const agentsResult = installAgentsKindStandalone(runtime, configDir, scope, resolvedProfile, pathPrefix, resolveAttribution, capabilityRegistry);
+  const agentsResult = installAgentsKindStandalone(runtime, configDir, scope, resolvedProfile, pathPrefix, resolveAttribution, capabilityRegistry, projectDir);
 
   _installNativePluginIfDeclared(runtime, configDir, behaviors, src);
 
